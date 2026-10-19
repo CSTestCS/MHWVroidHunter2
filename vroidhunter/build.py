@@ -11,7 +11,7 @@ from . import ctc as C
 from . import mod3 as M
 from . import mrl3 as R
 from . import tex as X
-from .fit import HunterSkeleton, fit_vrm
+from .fit import LEFT, RIGHT, HunterSkeleton, fit_vrm
 from .vrm import compute_tangents, load_vrm
 
 # A few well known sets for the picker; any plXXX_YYYY folder in the game works.
@@ -183,7 +183,8 @@ def material_kind(name):
 
 
 # Roughness / metal / translucency / subsurface for the RMT texture, per surface type.
-KIND_RMT = {"skin": (150, 0, 0, 40), "hair": (120, 0, 0, 0), "eye": (90, 0, 0, 0), "cloth": (190, 0, 0, 0)}
+# MHW's roughness curve is steep: below ~200 surfaces look glossy/wet, ~220+ is matte.
+KIND_RMT = {"skin": (225, 0, 0, 30), "hair": (212, 0, 0, 0), "eye": (190, 0, 0, 0), "cloth": (232, 0, 0, 0)}
 
 # VRoid colours are authored for toon shading, where white means "fully lit". Physically
 # based lighting needs albedo below ~85%, or bright areas glow in daylight.
@@ -379,6 +380,28 @@ def _extra_templates(game, gender, armor):
     return out
 
 
+SKIN_CB = "CBMhMaterialPLSkinLocal__disclosure"
+
+
+def _skin_templates(game, gender, log, limit=80):
+    """Materials using the game's player-skin shader (face model first, then armor sets)."""
+    paths = [p for p in game.listdir("pl\\%s_face\\face000\\" % gender) if p.lower().endswith(".mrl3")]
+    paths += [p for p in game.listdir("pl\\%s_equip\\" % gender) if p.lower().endswith(".mrl3")][:limit]
+    out = []
+    for p in paths:
+        try:
+            mrl = R.read_mrl3(game.read(p))
+        except Exception:
+            continue
+        found = [(m, mrl) for m in mrl.materials if SKIN_CB in R.cbuffer_names(m) and _template_score(m) is not None]
+        out += found
+        if len(out) >= 4:
+            break
+    if out:
+        log("  skin uses the game's player skin material")
+    return out
+
+
 def _template_score(m):
     """How well a game material suits a VRM surface: a plain, non-metal player material
     that receives the game's wetness and has albedo, normal and RMT slots."""
@@ -405,8 +428,10 @@ def _template_score(m):
     return score
 
 
-def _template_material(piece, name_hash, candidates=()):
-    """(material, its mrl3, mesh header) to clone for this piece's VRM materials."""
+def _template_material(piece, name_hash, candidates=(), kind="cloth"):
+    """(material, its mrl3, mesh header) to clone for this piece's VRM materials.
+
+    Skin prefers the game's own player-skin shader; everything else a plain player material."""
     ref, mrl = piece.ref, piece.mrl
     idx = _pick_reference_mesh(ref)
     header = ref.meshes[idx] if idx is not None else {}
@@ -416,6 +441,8 @@ def _template_material(piece, name_hash, candidates=()):
         sc = _template_score(m)
         if sc is None:
             continue
+        is_skin = SKIN_CB in R.cbuffer_names(m)
+        sc += 250 if (kind == "skin" and is_skin) else (-250 if is_skin else 0)
         if owner is mrl:
             sc += 1   # prefer the piece's own material on ties
         if best_score is None or sc > best_score:
@@ -453,14 +480,31 @@ def _hash_function(ref, mrl):
     return (lambda n: M.material_hash(n) & 0x7FFFFFFF) if masked else M.material_hash
 
 
+def _wet_defaults(candidates):
+    """Resting wetness values most game materials carry (the game raises them in rain)."""
+    from collections import Counter
+    vals = Counter()
+    for m, _ in candidates:
+        b = R.get_field(m, "fMaterialWetBlend")
+        r = R.get_field(m, "fMaterialWetRoughness")
+        if isinstance(b, float) and isinstance(r, float):
+            vals[(round(b, 4), round(r, 4))] += 1
+    if not vals:
+        return {}
+    b, r = vals.most_common(1)[0][0]
+    return {"fMaterialWetBlend": b, "fMaterialWetRoughness": r}
+
+
 def _write_materials(piece, model, texset, opts, tex_cache, name_hash, candidates=()):
-    template, ref_mrl, _ = _template_material(piece, name_hash, candidates)
-    if template is None:
+    first = _template_material(piece, name_hash, candidates)
+    if first[0] is None:
         raise ValueError("no usable material found in " + piece.mrl_path)
+    templates = {}
     new_mrl = R.Mrl3(list(piece.mrl.header), [], [])
     tex_index = {}
-    tex_code = ref_mrl.textures[0][0] if ref_mrl.textures else 0x241F5DEB
-    tex_unkn = ref_mrl.textures[0][1] if ref_mrl.textures else (0,) * 12
+    tex_code = first[1].textures[0][0] if first[1].textures else 0x241F5DEB
+    tex_unkn = first[1].textures[0][1] if first[1].textures else (0,) * 12
+    wet = _wet_defaults(candidates)
 
     def tex_slot(path):
         if path not in tex_index:
@@ -471,9 +515,12 @@ def _write_materials(piece, model, texset, opts, tex_cache, name_hash, candidate
     inverse = {v: k for k, v in piece.mat_lookup.items()}
     for local_index, name in enumerate(piece.mat_names):
         texs = _material_textures(model, inverse[local_index], texset, opts, tex_cache)
+        if texs.kind not in templates:
+            templates[texs.kind] = _template_material(piece, name_hash, candidates, texs.kind)
+        template, ref_mrl, _ = templates[texs.kind]
         m = template.clone()
         m.fields[1] = name_hash(name)
-        R.set_fields(m, dict(BASE_PARAMS, **KIND_PARAMS[texs.kind]))
+        R.set_fields(m, dict(BASE_PARAMS, **KIND_PARAMS[texs.kind], **wet))
         for b in m.bindings:
             if (b.res_type & 0xF) != R.RES_TEXTURE:
                 continue
@@ -663,12 +710,16 @@ def _hunter_neck_points(game, gender, skeleton_ref):
         homo = np.hstack([pos, np.ones((len(pos), 1))])
         posed = np.einsum("nk,nkij,nj->ni", w, moves[ids], homo)[:, :3]
         main = np.array([best.bones[i].function for i in ids[np.arange(len(ids)), w.argmax(axis=1)]])
-        out.append(posed[main == 3])   # the neck itself, not the face or the chest
+        neck = main == 3   # the neck itself, not the face or the chest
+        # The game may draw the face model on our moved skeleton or at the hunter's own
+        # proportions; cover the neck in both places.
+        out.append(posed[neck])
+        out.append(pos[neck])
     pts = np.vstack(out) if out else np.zeros((0, 3))
     return pts if len(pts) else None
 
 
-def _cover_neck(model, fit, neck_pts, skeleton_ref, margin=0.4, max_growth=1.6):
+def _cover_neck(model, fit, neck_pts, skeleton_ref, margin=0.5, max_growth=2.0):
     """Push the avatar's neck surface out to just cover the hunter's neck. Returns moved count."""
     index = skeleton_ref.function_to_index()
     if neck_pts is None or 3 not in index or 4 not in index:
@@ -751,6 +802,125 @@ def _cover_neck(model, fit, neck_pts, skeleton_ref, margin=0.4, max_growth=1.6):
             pos[push] = a + np.outer(h[push], axis) + radial[push] * scale
             moved += int(push.sum())
     return moved
+
+
+ARM_BINS = 16
+
+
+def _arm_profiles(refs, sk, side_ids, up, fore, hand):
+    """Average bone weights of the game's own armor along the upper arm and forearm.
+
+    Returns (arm functions, profiles[segment][bin] -> {function: weight}) learned from the
+    reference armor in its rest pose, or None when it has no arm geometry."""
+    arm = set(side_ids["upper"]) | {up, fore, hand, side_ids["fore_twist"]}
+    segs = [(sk.p(up), sk.p(fore)), (sk.p(fore), sk.p(hand))]
+    sums = [[{} for _ in range(ARM_BINS)] for _ in segs]
+    counts = np.zeros((2, ARM_BINS))
+    for ref in refs:
+        funcs_of = np.array([b.function for b in ref.bones]) if ref.bones else None
+        if funcs_of is None:
+            continue
+        for m in range(len(ref.meshes)):
+            skin = ref.mesh_skin(m)
+            if skin is None:
+                continue
+            pos, ids, w = skin
+            f = funcs_of[np.clip(ids, 0, len(funcs_of) - 1)]
+            in_arm = np.isin(f, list(arm))
+            mostly = (w * in_arm).sum(axis=1) > 0.95
+            if not np.any(mostly):
+                continue
+            P, F, W = pos[mostly], f[mostly], w[mostly]
+            ts = []
+            for a, b in segs:
+                ab = b - a
+                ts.append(np.clip((P - a) @ ab / max(float(ab @ ab), 1e-12), 0, 1))
+            # Segment by the vertex's main bone, as for the avatar's vertices.
+            dominant = F[np.arange(len(F)), W.argmax(axis=1)]
+            seg = np.where(np.isin(dominant, list(set(side_ids["upper"]) | {up})), 0, 1)
+            for i in range(len(P)):
+                k = seg[i]
+                bi = min(int(ts[k][i] * ARM_BINS), ARM_BINS - 1)
+                bucket = sums[k][bi]
+                for fn, wt in zip(F[i], W[i]):
+                    if wt > 0 and fn in arm:
+                        bucket[int(fn)] = bucket.get(int(fn), 0.0) + float(wt)
+                counts[k, bi] += 1
+    if counts.sum() < 20:
+        return None
+    profiles = [[None] * ARM_BINS for _ in segs]
+    for k in range(2):
+        for bi in range(ARM_BINS):
+            if counts[k, bi] >= 3:
+                total = sum(sums[k][bi].values())
+                profiles[k][bi] = {fn: v / total for fn, v in sums[k][bi].items()}
+        # Fill short gaps from the nearest filled bin; leave unknown stretches alone.
+        filled = [bi for bi in range(ARM_BINS) if profiles[k][bi] is not None]
+        if not filled:
+            continue
+        for bi in range(ARM_BINS):
+            if profiles[k][bi] is None:
+                near = min(filled, key=lambda x: abs(x - bi))
+                if abs(near - bi) <= 2:
+                    profiles[k][bi] = profiles[k][near]
+    return arm, profiles
+
+
+def _transfer_arm_weights(model, fit, refs, sk, new_ref, log):
+    """Give the avatar's arms the weighting the game's own armor uses (twist bones included),
+    measured along each arm segment, so wrists and elbows bend like the game expects."""
+    worlds = new_ref.bone_world_matrices()
+    index = new_ref.function_to_index()
+    changed = 0
+    for side, ids in (("left", LEFT), ("right", RIGHT)):
+        up = fit.bone_function.get(side + "UpperArm")
+        fore = fit.bone_function.get(side + "LowerArm")
+        hand = fit.bone_function.get(side + "Hand")
+        if None in (up, fore, hand) or not all(sk.has(f) for f in (up, fore, hand)) or \
+                not all(f in index for f in (up, fore, hand)):
+            continue
+        learned = _arm_profiles(refs, sk, ids, up, fore, hand)
+        if learned is None:
+            continue
+        arm, profiles = learned
+        segs = [(worlds[index[up]][:3, 3], worlds[index[fore]][:3, 3]),
+                (worlds[index[fore]][:3, 3], worlds[index[hand]][:3, 3])]
+        movable = set(ids["upper"]) | {up, fore, ids["fore_twist"]}
+        for pi in range(len(model.primitives)):
+            F, W, P = fit.functions[pi], fit.weights[pi], fit.positions[pi]
+            sel = np.nonzero(np.isin(F[:, 0], list(movable)))[0]
+            upper_set = set(ids["upper"]) | {up}
+            for i in sel:
+                # A vertex follows the profile of its own segment (upper arm or forearm).
+                k = 0 if int(F[i, 0]) in upper_set else 1
+                a, b = segs[k]
+                ab = b - a
+                t = float(np.clip((P[i] - a) @ ab / max(float(ab @ ab), 1e-12), 0, 1))
+                prof = profiles[k][min(int(t * ARM_BINS), ARM_BINS - 1)]
+                if not prof:
+                    continue
+                acc = {}
+                arm_mass = 0.0
+                for fn, wt in zip(F[i], W[i]):
+                    if wt <= 0:
+                        continue
+                    if int(fn) in arm:
+                        arm_mass += float(wt)
+                    else:
+                        acc[int(fn)] = acc.get(int(fn), 0.0) + float(wt)
+                for fn, share in prof.items():
+                    acc[fn] = acc.get(fn, 0.0) + arm_mass * share
+                items = sorted(acc.items(), key=lambda kv: -kv[1])[:4]
+                total = sum(v for _, v in items) or 1.0
+                F[i] = items[0][0]
+                W[i] = 0
+                for j, (fn, v) in enumerate(items):
+                    F[i, j] = fn
+                    W[i, j] = v / total
+                changed += 1
+    if changed:
+        log("  arms weighted like the game's own armor (%d vertices)" % changed)
+    return changed
 
 
 def _ctc_template(game, mods):
@@ -930,7 +1100,7 @@ def build(vrm_path, game, opts=None, log=print):
             planned, node_funcs = _plan_physics(model, used, room, log)
 
         sk = _union_skeleton(pieces)
-        fit = fit_vrm(model, sk, opts.height_scale, node_funcs, opts.keep_proportions)
+        fit = fit_vrm(model, sk, opts.height_scale, node_funcs, opts.keep_proportions, twist_weights=False)
         for n in fit.notes:
             log("  " + n)
         if opts.keep_proportions:
@@ -939,6 +1109,7 @@ def build(vrm_path, game, opts=None, log=print):
                 pc.ref = M.repose_skeleton(pc.ref, fit.joint_targets)
             refs = {p: M.repose_skeleton(r, fit.joint_targets) for p, r in refs.items()}
             log("  kept the avatar's own proportions (%d joints moved)" % len(fit.joint_targets))
+        _transfer_arm_weights(model, fit, [M.read_mod3(game.read(p)) for p in mods], sk, body.ref, log)
 
         # Add the physics bones to the piece each chain hangs from (head -> helmet).
         piece_chains = {}
@@ -997,6 +1168,8 @@ def build(vrm_path, game, opts=None, log=print):
             head_funcs |= {f for c in helm.chains for f in c["funcs"]}
         candidates = [(m, pc.mrl) for pc in pieces for m in pc.mrl.materials]
         candidates += _extra_templates(game, gender, armor)
+        if not any(SKIN_CB in R.cbuffer_names(m) for m, _ in candidates):
+            candidates += _skin_templates(game, gender, log)
         ref_sign = _reference_winding(body.ref)
         culled = 0
         for pi, prim in enumerate(model.primitives):

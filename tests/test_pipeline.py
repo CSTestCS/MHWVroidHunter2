@@ -447,12 +447,33 @@ def test_neck_covers_the_hunters_neck(tmp_path):
 
     before, after = neck_radii(off), neck_radii(on)
     assert before.max() < 4            # the avatar's neck is thinner than the hunter's (5 units)
-    # Now it covers it, but never grows more than 1.6x (the test avatar's neck is very thin).
-    assert after.min() >= min(5 * 0.95, before.min() * 1.6 - 1e-6)
-    assert after.max() <= before.max() * 1.6 + 1e-6
+    # Now it covers it, but never grows more than 2x (the test avatar's neck is very thin).
+    assert after.min() >= min(5 * 0.95, before.min() * 2.0 - 1e-6)
+    assert after.max() <= before.max() * 2.0 + 1e-6
     # Nothing far from the neck moves.
     b_off = M.read_mod3(piece(off, "body"))
     b_on = M.read_mod3(piece(on, "body"))
     for (_, p0, _, _, f0, _), (_, p1, _, _, f1, _) in zip(gather(b_off), gather(b_on)):
         far = f0[:, 0] != 3
         assert np.allclose(p0[far], p1[far])
+
+
+def test_arms_copy_the_game_armors_twist_weighting(built):
+    result, _, _ = built
+    body = M.read_mod3(piece(result, "body"))
+    w = body.bone_world_matrices()
+    idx = body.function_to_index()
+    checked = 0
+    for fore, hand, twist in ((7, 8, 81), (11, 12, 83)):
+        a, b = w[idx[fore]][:3, 3], w[idx[hand]][:3, 3]
+        ab = b - a
+        for _, pos, _, wt, f, _ in gather(body):
+            t = (pos - a) @ ab / (ab @ ab)
+            d = np.linalg.norm(pos - (a + np.outer(t, ab)), axis=1)
+            on = (t > 0.1) & (t < 0.9) & (d < 5) & np.isin(f[:, 0], [fore, twist])
+            for i in np.nonzero(on)[0]:
+                share = wt[i][f[i] == twist].sum()
+                # The reference armor puts share t on the twist bone (binned, so allow slack).
+                assert share == pytest.approx(t[i], abs=0.12), (t[i], share)
+                checked += 1
+    assert checked > 10

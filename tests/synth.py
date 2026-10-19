@@ -304,7 +304,7 @@ def _colmajor(m):
 
 
 def make_hunter_mod3(bones, material_names=("Ch_Pl_Body_Mt",), flip_winding=False, offset=(0, 0, 0),
-                     box=((-15, 15), (-10, 10), (95, 145)), weight_func=2):
+                     box=((-15, 15), (-10, 10), (95, 145)), weight_func=2, extra_parts=()):
     funcs = sorted(bones)
     index = {f: i for i, f in enumerate(funcs)}
     world = {f: np.array(bones[f][1], float) + offset for f in funcs}
@@ -358,7 +358,8 @@ def make_hunter_mod3(bones, material_names=("Ch_Pl_Body_Mt",), flip_winding=Fals
                       np.full((8, 4), index[weight_func]), np.tile([1.0, 0, 0, 0], (8, 1)), F)
     tmpl = dict(shadowCast=0x13, visibleCondition=0, weightDynamics=25, unkn3=0, unknownIndex=0,
                 mapData0=-1, mapData1=-1, intUnknown=0)
-    data = M.write_mod3(ref, [part], list(material_names), M.BLOCK_SKIN4_1UV, tmpl)
+    extra = [ep(index, np.array(offset, float)) for ep in extra_parts]
+    data = M.write_mod3(ref, [part] + extra, list(material_names), M.BLOCK_SKIN4_1UV, tmpl)
     return data
 
 
@@ -403,6 +404,20 @@ def make_hunter_mrl3(material_names=("Ch_Pl_Body_Mt",), tex_dir="pl\\f_equip\\pl
 LEG_BONES = {14, 15, 16, 17, 18, 19, 20, 21}
 
 
+def arm_tube(bones, fore, hand, twist):
+    """Reference gauntlet: forearm weights move from the forearm bone to the twist bone
+    along the forearm (twist share = t), like real MHW armor."""
+    def make(index, offset):
+        a, b = np.array(bones[fore][1]) + offset, np.array(bones[hand][1]) + offset
+        P, N, T, F = _tube(a, b, 4.0, sides=8, rings=9)
+        ids = np.zeros((len(P), 4), dtype=np.int64)
+        w = np.zeros((len(P), 4))
+        ids[:, 0], ids[:, 1] = index[fore], index[twist]
+        w[:, 0], w[:, 1] = 1 - T, T
+        return M.MeshPart(0, P, N, np.tile([1.0, 0, 0, 1], (len(P), 1)), np.zeros((len(P), 2)), ids, w, F)
+    return make
+
+
 def make_game_folder(root, armor="pl001_0000", genders=("f", "m"), flip_winding=False, partial_body=False):
     """Write a fake extracted-game folder that FolderFiles can read.
 
@@ -420,8 +435,11 @@ def make_game_folder(root, armor="pl001_0000", genders=("f", "m"), flip_winding=
             piece_bones = bones
             if partial_body and part == "body":
                 piece_bones = {k: v for k, v in bones.items() if k not in LEG_BONES}
+            extra = ()
+            if part == "arm":
+                extra = (arm_tube(piece_bones, 7, 8, 81), arm_tube(piece_bones, 11, 12, 83))
             with open(os.path.join(d, stem + ".mod3"), "wb") as f:
-                f.write(make_hunter_mod3(piece_bones, mats, flip_winding))
+                f.write(make_hunter_mod3(piece_bones, mats, flip_winding, extra_parts=extra))
             with open(os.path.join(d, stem + ".mrl3"), "wb") as f:
                 f.write(make_hunter_mrl3(mats, "pl\\%s_equip\\%s\\%s\\tex\\" % (g, armor, part),
                                          metal_first=(part == "body")))

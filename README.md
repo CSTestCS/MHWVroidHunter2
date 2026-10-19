@@ -61,15 +61,18 @@ checked against known checksums. You can also pick the file yourself.
   only reacts to the avatar and not to the replaced armor's shape.
 * **Lines up the wrists.** Forearms are the one exception to keeping proportions:
   they take the hunter's forearm length and the arm's twist bones are spaced to
-  match, so wrists don't twist or pinch in animations.
+  match. The arms are then weighted to the twist and hand bones the same way the
+  game's own armor is, so wrists don't twist or pinch in animations.
 * **Hides the hunter's own neck.** The game still draws your hunter's face and neck
   under the helmet. Where it would poke out around a slimmer avatar neck, the
-  avatar's neck is thickened just enough to cover it (at most 1.6x), and nothing
+  avatar's neck is thickened just enough to cover it (at most 2x), and nothing
   else changes.
-* **Matches the game's lighting.** Materials are cloned from a plain, non-metal
-  player material that gets the game's wet effect. Skin, hair, eyes and cloth get
-  their own roughness, and skin gets subsurface scattering. Colours are toned to
-  the brightness range the game's lighting expects.
+* **Matches the game's lighting.** The avatar's skin uses the game's own
+  player-skin material (the one your hunter's face and arms use), and hair, eyes
+  and cloth are cloned from a plain, non-metal player material. Both keep the
+  game's wet settings, so the avatar only looks wet when your hunter would (rain,
+  water). Everything is matte by default, and colours are toned to the brightness
+  range the game's lighting expects.
 * **Splits the avatar like real armor.** The head and hair go in the helmet
   model, the rest in the body model. Armor pieces the avatar doesn't need (arms,
   waist, legs) are made invisible so they don't poke through.

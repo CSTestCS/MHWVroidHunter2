@@ -141,7 +141,7 @@ def _pick_upper_arm(sk, candidates, elbow):
     return best
 
 
-def fit_vrm(model, sk, height_scale=1.0, node_functions=None, keep_proportions=True):
+def fit_vrm(model, sk, height_scale=1.0, node_functions=None, keep_proportions=True, twist_weights=True):
     """node_functions: optional {vrm node: hunter function} for joints that keep their
     own bone (physics joints); everything else is merged into the humanoid bones.
 
@@ -453,7 +453,7 @@ def fit_vrm(model, sk, height_scale=1.0, node_functions=None, keep_proportions=T
             newt = np.hstack([newt / lt, tan[:, 3:4]])
 
         f_ids, f_w = _merge_weights(funcs, prim.weights)
-        if twist:
+        if twist and twist_weights:
             f_ids, f_w = _apply_twist(newp, f_ids, f_w, twist)
         out_pos.append(newp)
         out_nrm.append(newn)
