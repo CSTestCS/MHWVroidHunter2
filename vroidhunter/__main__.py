@@ -31,6 +31,8 @@ def _cli(argv):
                        help="use a folder of already-extracted game files instead of reading chunks")
         p.add_argument("--armor", default=DEFAULT_ARMOR)
         p.add_argument("--no-physics", action="store_true", help="don't convert spring bones to physics")
+        p.add_argument("--hunter-proportions", action="store_true",
+                       help="stretch the avatar onto the hunter's build instead of keeping its proportions")
         p.add_argument("--oodle", default=None, help="path to oo2core_8_win64.dll (or oo2core_9)")
         p.add_argument("--download-oodle", action="store_true",
                        help="if oo2core_8_win64.dll isn't found, download it from Warframe's public update server")
@@ -72,7 +74,8 @@ def _cli(argv):
         return
 
     opts = Options(armor=args.armor, genders=("f",) if args.female_only else ("f", "m"),
-                   physics=not args.no_physics, height_scale=args.height)
+                   physics=not args.no_physics, keep_proportions=not args.hunter_proportions,
+                   height_scale=args.height)
     gf = files()
     try:
         result = build(args.vrm, gf, opts)

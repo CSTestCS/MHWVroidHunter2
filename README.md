@@ -48,10 +48,13 @@ checked against known checksums. You can also pick the file yourself.
 
 ## What it does
 
-* **Fits the avatar to your hunter.** The avatar is turned to face the right
-  way and scaled so its height matches your hunter's. Each limb is then lined up
-  with the hunter's joints (the hunter stands in an A-pose). The game's height
-  slider scales the avatar like it scales armor.
+* **Keeps your avatar's proportions.** The avatar is turned to face the right
+  way and scaled to your hunter's height. Its arms are rotated into the hunter's
+  A-pose, and then the hunter's skeleton inside the armor files is moved to match
+  the avatar's own joints. Long legs, a small head or short arms stay that way, and
+  the game's animations bend the avatar at its own elbows and knees. The game's
+  height slider still scales it. (Untick *Keep the VRoid model's own proportions*
+  to stretch the avatar onto the hunter's build instead.)
 * **Keeps the physics.** VRM spring bones (hair, skirts, ribbons, tails) become
   MHW physics chains (`.ctc`), using tuning values from a hair physics file in your own game.
 * **Splits the avatar like real armor.** The head and hair go in the helmet
@@ -83,11 +86,12 @@ checked against known checksums. You can also pick the file yourself.
 | Avatar has your hunter's head | Turn *Show headgear* on, and wear the helmet of the set. |
 | Your hunter's face shows through | Pick a set marked "full helmet". |
 | Game crashes on load | Press **Uninstall**, then try another set or untick physics. |
+| Weapons or the slinger float away from the hands | Untick *Keep the VRoid model's own proportions*; very different arm lengths can confuse attachments. |
 
 ## Command line
 
 ```
-VRoidHunter install  avatar.vrm [--game DIR] [--armor pl001_0000] [--no-physics] [--height 1.0] [--female-only]
+VRoidHunter install  avatar.vrm [--game DIR] [--armor pl001_0000] [--no-physics] [--hunter-proportions] [--height 1.0] [--female-only]
                      [--oodle PATH | --download-oodle]
 VRoidHunter export   avatar.vrm OUTDIR [same options]
 VRoidHunter uninstall [--game DIR]

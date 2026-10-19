@@ -98,7 +98,9 @@ def test_avatar_fits_hunter(built):
     body = M.read_mod3(piece(result, "body"))
     helm = M.read_mod3(piece(result, "helm"))
     ref = M.read_mod3(files.read(BASE % ("body", "body", "mod3")))
-    assert body.skeleton_raw == ref.skeleton_raw   # no physics on the body in this avatar
+    # Same bones and hierarchy as the game's model (joints may move to fit the avatar).
+    assert [(b.function, b.parent) for b in body.bones] == [(b.function, b.parent) for b in ref.bones]
+    assert body.remap == ref.remap
     bones = hunter_bones()
     all_pos, all_funcs, body_z = [], [], []
     for mod in (body, helm):
@@ -294,3 +296,56 @@ def test_physics_budget_thins_long_chains():
     ids = [f for c in planned for f in c.funcs + [c.end_func]]
     assert len(ids) == len(set(ids)) and not set(ids) & set(range(150, 160))
     assert all(c.nodes[0] in (0, 120) for c in planned)
+
+
+def _limb_check(tmp_path, keep):
+    # An avatar with long legs and long forearms, unlike the hunter.
+    data, joints = make_vrm(0, leg_scale=1.35, arm_scale=1.3)
+    (tmp_path / "a.vrm").write_bytes(data)
+    make_game_folder(str(tmp_path / "g"), genders=("f",))
+    files = FolderFiles(str(tmp_path / "g"))
+    result = build(str(tmp_path / "a.vrm"), files, Options(genders=("f",), keep_proportions=keep),
+                   log=lambda m: None)
+    body = M.read_mod3(piece(result, "body"))
+    worlds = body.bone_world_matrices()
+    at = {b.function: worlds[i][:3, 3] for i, b in enumerate(body.bones)}
+    return body, at, joints
+
+
+def _ratio(a, b, c, d):
+    return np.linalg.norm(a - b) / np.linalg.norm(c - d)
+
+
+def test_keeps_avatar_proportions(tmp_path):
+    body, at, j = _limb_check(tmp_path, keep=True)
+    # Leg / torso ratio of the skeleton now matches the avatar, not the hunter.
+    avatar = _ratio(j["leftUpperLeg"], j["leftFoot"], (j["leftUpperLeg"] + j["rightUpperLeg"]) / 2, j["neck"])
+    skel = _ratio(at[14], at[16], (at[14] + at[18]) / 2, at[3])
+    hunter = hunter_bones()
+    hunter_ratio = _ratio(np.array(hunter[14][1]), np.array(hunter[16][1]),
+                          (np.array(hunter[14][1]) + np.array(hunter[18][1])) / 2, np.array(hunter[3][1]))
+    assert skel == pytest.approx(avatar, rel=0.08)
+    assert abs(skel - hunter_ratio) > 0.2
+    # Forearm / upper arm ratio follows the avatar too.
+    assert _ratio(at[7], at[8], at[6], at[7]) == pytest.approx(
+        _ratio(j["leftLowerArm"], j["leftHand"], j["leftUpperArm"], j["leftLowerArm"]), rel=0.08)
+    # Still the hunter's height, standing on the ground, arms in the hunter's A-pose direction.
+    assert at[4][2] == pytest.approx(hunter[4][1][2], abs=4)
+    assert (at[16][2] + at[20][2]) / 2 == pytest.approx((hunter[16][1][2] + hunter[20][1][2]) / 2, abs=2)
+    arm = (at[8] - at[6]) / np.linalg.norm(at[8] - at[6])
+    hunter_arm = np.array(hunter[8][1]) - np.array(hunter[6][1])
+    assert np.dot(arm, hunter_arm / np.linalg.norm(hunter_arm)) > 0.99
+    # Skin follows the moved bones: calf vertices sit around the moved calf joint.
+    for _, pos, _, w, f, _ in gather(body):
+        calf = pos[f[:, 0] == 15]
+        if len(calf):
+            assert np.linalg.norm(calf - at[15], axis=1).min() < 6
+    # Unmapped bones (the twist bone) follow their parent.
+    assert np.linalg.norm(at[81] - at[7]) < np.linalg.norm(at[8] - at[7])
+
+
+def test_hunter_proportions_option_leaves_skeleton(tmp_path):
+    body, at, j = _limb_check(tmp_path, keep=False)
+    hunter = hunter_bones()
+    for f in (6, 7, 8, 14, 15, 16):
+        assert np.allclose(at[f], hunter[f][1], atol=1e-3)

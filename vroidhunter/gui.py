@@ -69,12 +69,15 @@ class App:
         self.physics = tk.BooleanVar(value=True)
         ttk.Checkbutton(frm, text="Physics for hair, skirts and accessories (from the VRM's spring bones)",
                         variable=self.physics).grid(row=6, column=1, sticky="w", **pad)
+        self.keep = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frm, text="Keep the VRoid model's own proportions (untick to stretch it to the hunter's build)",
+                        variable=self.keep).grid(row=7, column=1, sticky="w", **pad)
         self.both = tk.BooleanVar(value=True)
         ttk.Checkbutton(frm, text="Make it work for both female and male hunters",
-                        variable=self.both).grid(row=7, column=1, sticky="w", **pad)
+                        variable=self.both).grid(row=8, column=1, sticky="w", **pad)
 
         bf = ttk.Frame(frm)
-        bf.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(10, 4))
+        bf.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(10, 4))
         ttk.Button(bf, text="Install", command=self.do_install).pack(side="left", padx=4)
         ttk.Button(bf, text="Uninstall", command=self.do_uninstall).pack(side="left", padx=4)
         ttk.Button(bf, text="Export to folder...", command=self.do_export).pack(side="left", padx=4)
@@ -82,8 +85,8 @@ class App:
         self.progress.pack(side="right", padx=4)
 
         self.log_box = tk.Text(frm, height=12, wrap="word", state="disabled")
-        self.log_box.grid(row=9, column=0, columnspan=3, sticky="nsew", **pad)
-        frm.rowconfigure(9, weight=1)
+        self.log_box.grid(row=10, column=0, columnspan=3, sticky="nsew", **pad)
+        frm.rowconfigure(10, weight=1)
 
         self.check_loader()
         root.after(100, self.pump)
@@ -231,6 +234,7 @@ class App:
         return Options(armor=self.selected_armor(),
                        genders=("f", "m") if self.both.get() else ("f",),
                        physics=self.physics.get(),
+                       keep_proportions=self.keep.get(),
                        height_scale=max(0.5, min(1.5, self.height.get() / 100.0)))
 
     def _files(self, log):

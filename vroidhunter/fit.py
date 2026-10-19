@@ -113,6 +113,7 @@ class FitResult:
     node_positions: object = None   # (nodes,3) every VRM node in hunter space
     node_bone: dict = None          # node -> canonical humanoid ancestor
     bone_function: dict = None      # canonical humanoid bone -> hunter function
+    joint_targets: dict = None      # hunter function -> new joint position (keep_proportions)
 
 
 class HunterSkeleton:
@@ -139,9 +140,13 @@ def _pick_upper_arm(sk, candidates, elbow):
     return best
 
 
-def fit_vrm(model, sk, height_scale=1.0, node_functions=None):
+def fit_vrm(model, sk, height_scale=1.0, node_functions=None, keep_proportions=True):
     """node_functions: optional {vrm node: hunter function} for joints that keep their
-    own bone (physics joints); everything else is merged into the humanoid bones."""
+    own bone (physics joints); everything else is merged into the humanoid bones.
+
+    keep_proportions: True keeps the avatar's own limb lengths (only rotating limbs into
+    the hunter's rest pose) and reports where the hunter's joints must move to
+    (joint_targets). False stretches every limb onto the hunter's joints instead."""
     node_functions = node_functions or {}
     notes = []
     H = model.humanoid
@@ -220,35 +225,53 @@ def fit_vrm(model, sk, height_scale=1.0, node_functions=None):
     I = np.eye(3)
     T = {}  # canonical bone name -> Affine, in the already globally-aligned space
 
+    def seg(b0, b1, f0, f1, rot, parent, stretch=True):
+        """Map avatar segment b0->b1 onto the hunter direction f0->f1.
+
+        Keeping proportions, the segment starts where its parent put the joint and keeps
+        its length; otherwise it is snapped and stretched onto the hunter's joints."""
+        if keep_proportions:
+            start = parent.apply(V(b0)[None, :])[0]
+            return _segment(V(b0), V(b1), start, start + (sk.p(f1) - sk.p(f0)), rot, stretch=False)
+        return _segment(V(b0), V(b1), sk.p(f0), sk.p(f1), rot, stretch)
+
+    def place(b, f, rot, parent):
+        """Rigid placement for an end bone (head, hand, toes...)."""
+        start = parent.apply(V(b)[None, :])[0] if keep_proportions else sk.p(f)
+        return Affine(rot.copy(), V(b), start, rot)
+
     # --- 3a. torso as one block ---------------------------------------------
     v_hipmid_w = (V("leftUpperLeg") + V("rightUpperLeg")) / 2
     v_neck_w = V("neck") if "neck" in H else V("head")
     t_hips = h_hipmid + (V("hips") - v_hipmid_w)
-    torso = _segment(V("hips"), v_neck_w, t_hips, h_neck, I)
+    torso = _segment(V("hips"), v_neck_w, t_hips, h_neck, I, stretch=not keep_proportions)
     for name in TORSO:
         if name in H:
             T[name] = torso
     q_torso = torso.rot
 
     # --- 3b. neck and head ---------------------------------------------------
+    neck_parent = torso
     if "neck" in H and sk.has(NECK):
-        T["neck"] = _segment(V("neck"), V("head"), sk.p(NECK), sk.p(HEAD), q_torso)
-    T["head"] = Affine(q_torso.copy(), V("head"), sk.p(HEAD), q_torso)
+        T["neck"] = seg("neck", "head", NECK, HEAD, q_torso, torso)
+        neck_parent = T["neck"]
+    T["head"] = place("head", HEAD, q_torso, neck_parent)
 
     # --- 3c. arms, hands, fingers --------------------------------------------
     for side, ids, up_id in (("left", LEFT, up_l), ("right", RIGHT, up_r)):
         n = lambda b: side + b
         parent_rot = q_torso
+        parent = torso
         if n("Shoulder") in H and sk.has(ids["shoulder"]):
-            seg = _segment(V(n("Shoulder")), V(n("UpperArm")), sk.p(ids["shoulder"]), sk.p(up_id), parent_rot)
-            T[n("Shoulder")] = seg
+            T[n("Shoulder")] = seg(n("Shoulder"), n("UpperArm"), ids["shoulder"], up_id, parent_rot, torso)
+            parent = T[n("Shoulder")]
         chain = [(n("UpperArm"), up_id), (n("LowerArm"), ids["fore"]), (n("Hand"), ids["hand"])]
         rot = parent_rot
         for (b0, f0), (b1, f1) in zip(chain, chain[1:]):
             if b0 in H and b1 in H and sk.has(f0) and sk.has(f1):
-                seg = _segment(V(b0), V(b1), sk.p(f0), sk.p(f1), rot)
-                T[b0] = seg
-                rot = seg.rot
+                T[b0] = seg(b0, b1, f0, f1, rot, parent)
+                rot = T[b0].rot
+                parent = T[b0]
         # Hand: match the whole hand frame (finger direction + knuckle line).
         hand = n("Hand")
         if hand in H and sk.has(ids["hand"]):
@@ -262,39 +285,46 @@ def fit_vrm(model, sk, height_scale=1.0, node_functions=None):
                 fh_h = frame(sk.p(mid_h) - sk.p(ids["hand"]), sk.p(ids["index"][0]) - sk.p(ids["little"][0]))
                 if fv_h is not None and fh_h is not None:
                     q_hand = fh_h @ fv_h.T
-            T[hand] = Affine(q_hand.copy(), V(hand), sk.p(ids["hand"]), q_hand)
+            T[hand] = place(hand, ids["hand"], q_hand, parent)
             for vname, key, parts in FINGERS:
                 bones = [n(vname + p) for p in parts]
                 funcs = ids[key]
-                frot = q_hand
+                frot, fparent = q_hand, T[hand]
                 for i, (b, f) in enumerate(zip(bones, funcs)):
                     if b not in H or not sk.has(f):
                         break
                     if i + 1 < len(bones) and bones[i + 1] in H and sk.has(funcs[i + 1]):
-                        seg = _segment(V(b), V(bones[i + 1]), sk.p(f), sk.p(funcs[i + 1]), frot)
+                        T[b] = seg(b, bones[i + 1], f, funcs[i + 1], frot, fparent)
                     else:
-                        seg = Affine(frot.copy(), V(b), sk.p(f), frot)
-                    T[b] = seg
-                    frot = seg.rot
+                        T[b] = place(b, f, frot, fparent)
+                    frot, fparent = T[b].rot, T[b]
 
     # --- 3d. legs and feet ----------------------------------------------------
     for side, ids in (("left", LEFT), ("right", RIGHT)):
         n = lambda b: side + b
         rot = q_torso
+        parent = torso
         chain = [(n("UpperLeg"), ids["thigh"]), (n("LowerLeg"), ids["calf"]), (n("Foot"), ids["foot"])]
         for (b0, f0), (b1, f1) in zip(chain, chain[1:]):
             if b0 in H and b1 in H and sk.has(f0) and sk.has(f1):
-                seg = _segment(V(b0), V(b1), sk.p(f0), sk.p(f1), rot)
-                T[b0] = seg
-                rot = seg.rot
+                T[b0] = seg(b0, b1, f0, f1, rot, parent)
+                rot = T[b0].rot
+                parent = T[b0]
         foot = n("Foot")
         if foot in H:
             if n("Toes") in H and sk.has(ids["toe"]):
-                seg = _segment(V(foot), V(n("Toes")), sk.p(ids["foot"]), sk.p(ids["toe"]), q_torso, stretch=False)
-                T[foot] = seg
-                T[n("Toes")] = Affine(seg.rot.copy(), V(n("Toes")), sk.p(ids["toe"]), seg.rot)
+                T[foot] = seg(foot, n("Toes"), ids["foot"], ids["toe"], q_torso, parent, stretch=False)
+                T[n("Toes")] = place(n("Toes"), ids["toe"], T[foot].rot, T[foot])
             else:
-                T[foot] = Affine(q_torso.copy(), V(foot), sk.p(ids["foot"]), q_torso)
+                T[foot] = place(foot, ids["foot"], q_torso, parent)
+
+    # --- 3e. keeping proportions: stand the posed avatar on the hunter's feet --------
+    if keep_proportions:
+        ankles = [T[b].target for b in ("leftFoot", "rightFoot") if b in T]
+        if ankles:
+            delta = h_feet - np.mean(ankles, axis=0)
+            for aff in {id(a): a for a in T.values()}.values():
+                aff.target = aff.target + delta
 
     # --- 4. weights: VRM node -> canonical humanoid bone -> hunter function ----
     node_to_bone = {node: name for name, node in H.items()}
@@ -347,11 +377,23 @@ def fit_vrm(model, sk, height_scale=1.0, node_functions=None):
     for node in range(len(model.nodes)):
         node_bone[node] = humanoid_ancestor(node)
 
+    # Where each hunter joint has to move so the skeleton matches the avatar.
+    joint_targets = {}
+    if keep_proportions:
+        for bone, func in weight_target.items():
+            if bone in ("upperChest", "leftEye", "rightEye", "jaw") or bone not in H or bone not in T:
+                continue
+            if sk.has(func) and func not in joint_targets:
+                joint_targets[func] = T[bone].apply(V(bone)[None, :])[0]
+
+    def joint(f):
+        return joint_targets.get(f, sk.p(f))
+
     twist = {}
     for ids in (LEFT, RIGHT):
         tw = ids["fore_twist"]
         if sk.has(tw) and sk.parent.get(tw) == ids["fore"] and sk.has(ids["hand"]):
-            twist[ids["fore"]] = (tw, sk.p(ids["fore"]), sk.p(ids["hand"]))
+            twist[ids["fore"]] = (tw, joint(ids["fore"]), joint(ids["hand"]))
 
     out_pos, out_nrm, out_tan, out_fn, out_w = [], [], [], [], []
     for prim in model.primitives:
@@ -402,7 +444,8 @@ def fit_vrm(model, sk, height_scale=1.0, node_functions=None):
     node_pos = np.array([transform_for(node_bone[i]).apply(nodes_w[i][None, :])[0]
                          for i in range(len(model.nodes))]) if model.nodes else np.zeros((0, 3))
     bone_function = {b: resolve_function(b) for b in set(node_bone.values())}
-    return FitResult(out_pos, out_nrm, out_tan, out_fn, out_w, s, notes, node_pos, node_bone, bone_function)
+    return FitResult(out_pos, out_nrm, out_tan, out_fn, out_w, s, notes, node_pos, node_bone, bone_function,
+                     joint_targets)
 
 
 _PARENT = {

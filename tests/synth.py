@@ -104,12 +104,22 @@ def _tube(p0, p1, radius, sides=6, rings=4):
     return P, np.array(nrm), np.array(ts), F
 
 
-def make_vrm(version=0, facing=+1):
-    """Build a .vrm (glb) in memory. facing=+1: model looks along +Z, -1: along -Z."""
+def _proportioned(name, p, leg_scale, arm_scale):
+    x, y, z = p
+    if ("Leg" in name or "Foot" in name or "Toes" in name) and y < 0.95:
+        y = 0.95 - (0.95 - y) * leg_scale
+    if any(k in name for k in ("LowerArm", "Hand", "Proximal")) and abs(x) > 0.15:
+        x = np.sign(x) * (0.15 + (abs(x) - 0.15) * arm_scale)
+    return (x, y, z)
+
+
+def make_vrm(version=0, facing=+1, leg_scale=1.0, arm_scale=1.0):
+    """Build a .vrm (glb) in memory. facing=+1: model looks along +Z, -1: along -Z.
+    leg_scale / arm_scale stretch the avatar's limbs to give it non-hunter proportions."""
     names = [b[0] for b in VRM_BONES]
     index = {n: i for i, n in enumerate(names)}
     flip = np.array([facing, 1, facing], float)   # rotate 180 deg about Y when facing -Z
-    world = {n: np.array(p, float) * flip for n, p, _ in [(b[0], b[2], None) for b in VRM_BONES]}
+    world = {b[0]: np.array(_proportioned(b[0], b[2], leg_scale, arm_scale), float) * flip for b in VRM_BONES}
 
     nodes = []
     for name, parent, pos in VRM_BONES:

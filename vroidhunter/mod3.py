@@ -516,6 +516,14 @@ def extend_skeleton(ref, new_bones):
         index[func] = len(bones) - 1
     if len(bones) > 255:
         raise ValueError("too many bones (%d, the limit is 255)" % len(bones))
+    raw, remap = _serialize_skeleton(ref, bones, lms, ams)
+    header = dict(ref.header)
+    header["boneCount"] = len(bones)
+    return dataclasses.replace(ref, header=header, bones=bones, lmatrices=np.array(lms),
+                               amatrices=np.array(ams), remap=bytes(remap), skeleton_raw=bytes(raw))
+
+
+def _serialize_skeleton(ref, bones, lms, ams):
     raw = bytearray()
     for b in bones:
         raw += struct.pack(BONE_FMT, b.function, b.parent, b.child, b.unkn2, b.length, *b.position)
@@ -528,7 +536,46 @@ def extend_skeleton(ref, new_bones):
         if b.function < REMAP_SIZE:
             remap[b.function] = i if i < 255 else 255
     raw += remap
-    header = dict(ref.header)
-    header["boneCount"] = len(bones)
-    return dataclasses.replace(ref, header=header, bones=bones, lmatrices=np.array(lms),
-                               amatrices=np.array(ams), remap=bytes(remap), skeleton_raw=bytes(raw))
+    return bytes(raw), bytes(remap)
+
+
+def repose_skeleton(ref, targets):
+    """Copy of `ref` whose joints sit at new world positions.
+
+    targets: {bone function: world position}. Those bones keep their world orientation
+    and move; every other bone keeps its offset from its parent and follows along.
+    """
+    import dataclasses
+    if not ref.bones or not targets:
+        return ref
+    old = ref.bone_world_matrices()
+    n = len(ref.bones)
+    new = [None] * n
+
+    def solve(i):
+        if new[i] is None:
+            b = ref.bones[i]
+            parent = b.parent if b.parent != 255 and b.parent < n else None
+            if b.function in targets:
+                w = old[i].copy()
+                w[:3, 3] = targets[b.function]
+            elif parent is None:
+                w = old[i].copy()
+            else:
+                w = solve(parent) @ (np.linalg.inv(old[parent]) @ old[i])
+            new[i] = w
+        return new[i]
+
+    for i in range(n):
+        solve(i)
+    bones, lms, ams = [], [], []
+    for i, b in enumerate(ref.bones):
+        parent = b.parent if b.parent != 255 and b.parent < n else None
+        local = new[i] if parent is None else np.linalg.inv(new[parent]) @ new[i]
+        t = local[:3, 3]
+        bones.append(Bone(b.function, b.parent, b.child, b.unkn2, float(np.linalg.norm(t)), tuple(map(float, t))))
+        lms.append(local)
+        ams.append(np.linalg.inv(new[i]))
+    raw, remap = _serialize_skeleton(ref, bones, lms, ams)
+    return dataclasses.replace(ref, bones=bones, lmatrices=np.array(lms), amatrices=np.array(ams),
+                               remap=remap, skeleton_raw=raw)

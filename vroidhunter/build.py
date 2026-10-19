@@ -37,6 +37,7 @@ class Options:
     genders: tuple = ("f", "m")
     height_scale: float = 1.0
     physics: bool = True
+    keep_proportions: bool = True   # False: stretch the avatar onto the hunter's body shape
     max_texture: int = 2048
     double_sided: bool = True
     alpha_cull: bool = True
@@ -642,9 +643,15 @@ def build(vrm_path, game, opts=None, log=print):
             planned, node_funcs = _plan_physics(model, used, room, log)
 
         sk = _union_skeleton(pieces)
-        fit = fit_vrm(model, sk, opts.height_scale, node_funcs)
+        fit = fit_vrm(model, sk, opts.height_scale, node_funcs, opts.keep_proportions)
         for n in fit.notes:
             log("  " + n)
+        if opts.keep_proportions:
+            # Move the hunter's joints to the avatar's joints so its proportions are kept.
+            for pc in pieces:
+                pc.ref = M.repose_skeleton(pc.ref, fit.joint_targets)
+            refs = {p: M.repose_skeleton(r, fit.joint_targets) for p, r in refs.items()}
+            log("  kept the avatar's own proportions (%d joints moved)" % len(fit.joint_targets))
 
         # Add the physics bones to the piece each chain hangs from (head -> helmet).
         piece_chains = {}
