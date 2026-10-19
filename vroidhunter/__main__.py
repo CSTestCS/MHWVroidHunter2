@@ -3,7 +3,7 @@
 No arguments (or just a .vrm path, e.g. by dropping the file on the .exe)
 opens the window. Subcommands give a command line:
 
-    VRoidHunter install  model.vrm [--game DIR] [--armor pl001_0000] [--no-physics] [--height 1.0]
+    VRoidHunter install  model.vrm [--game DIR] [--armor pl123_0000] [--no-physics] [--height 1.0]
     VRoidHunter export   model.vrm OUTDIR [same options]
     VRoidHunter uninstall [--game DIR]
     VRoidHunter armors   [--game DIR]

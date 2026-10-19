@@ -40,7 +40,7 @@ def built(request, tmp_path):
     game_root = tmp_path / "game"
     make_game_folder(str(game_root), flip_winding=flip)
     files = FolderFiles(str(game_root))
-    result = build(str(vrm_path), files, Options(), log=lambda m: None)
+    result = build(str(vrm_path), files, Options(armor=ARMOR), log=lambda m: None)
     return result, files, flip
 
 
@@ -55,6 +55,7 @@ def test_vrm_loader_reads_humanoid():
     assert model1.version == 1
 
 
+ARMOR = "pl001_0000"
 BASE = "pl\\f_equip\\pl001_0000\\%s\\mod\\f_%s001.%s"
 
 
@@ -175,7 +176,7 @@ def test_physics_can_be_turned_off(tmp_path):
     (tmp_path / "a.vrm").write_bytes(data)
     make_game_folder(str(tmp_path / "g"), genders=("f",))
     result = build(str(tmp_path / "a.vrm"), FolderFiles(str(tmp_path / "g")),
-                   Options(genders=("f",), physics=False), log=lambda m: None)
+                   Options(armor=ARMOR, genders=("f",), physics=False), log=lambda m: None)
     assert not any(p.endswith(".ctc") for p in result.files)
 
 
@@ -260,7 +261,7 @@ def test_partial_body_skeleton_moves_legs_to_another_piece(tmp_path):
     (tmp_path / "a.vrm").write_bytes(data)
     make_game_folder(str(tmp_path / "g"), genders=("f",), partial_body=True)
     files = FolderFiles(str(tmp_path / "g"))
-    result = build(str(tmp_path / "a.vrm"), files, Options(genders=("f",)), log=lambda m: None)
+    result = build(str(tmp_path / "a.vrm"), files, Options(armor=ARMOR, genders=("f",)), log=lambda m: None)
     used_anywhere = set()
     for part in ("helm", "body", "arm", "wst", "leg"):
         path = "pl\\f_equip\\pl001_0000\\%s\\mod\\f_%s001.mod3" % (part, part)
@@ -316,7 +317,7 @@ def _limb_check(tmp_path, keep):
     (tmp_path / "a.vrm").write_bytes(data)
     make_game_folder(str(tmp_path / "g"), genders=("f",))
     files = FolderFiles(str(tmp_path / "g"))
-    result = build(str(tmp_path / "a.vrm"), files, Options(genders=("f",), keep_proportions=keep),
+    result = build(str(tmp_path / "a.vrm"), files, Options(armor=ARMOR, genders=("f",), keep_proportions=keep),
                    log=lambda m: None)
     body = M.read_mod3(piece(result, "body"))
     worlds = body.bone_world_matrices()
@@ -412,7 +413,7 @@ def test_auto_capsules_without_vrm_colliders(tmp_path):
 
     B.load_vrm = no_colliders
     try:
-        result = build(str(tmp_path / "a.vrm"), FolderFiles(str(tmp_path / "g")), Options(genders=("f",)),
+        result = build(str(tmp_path / "a.vrm"), FolderFiles(str(tmp_path / "g")), Options(armor=ARMOR, genders=("f",)),
                        log=lambda m: None)
     finally:
         B.load_vrm = real
@@ -427,8 +428,8 @@ def test_neck_covers_the_hunters_neck(tmp_path):
     (tmp_path / "a.vrm").write_bytes(data)
     make_game_folder(str(tmp_path / "g"), genders=("f",))
     files = FolderFiles(str(tmp_path / "g"))
-    on = build(str(tmp_path / "a.vrm"), files, Options(genders=("f",)), log=lambda m: None)
-    off = build(str(tmp_path / "a.vrm"), files, Options(genders=("f",), cover_neck=False), log=lambda m: None)
+    on = build(str(tmp_path / "a.vrm"), files, Options(armor=ARMOR, genders=("f",)), log=lambda m: None)
+    off = build(str(tmp_path / "a.vrm"), files, Options(armor=ARMOR, genders=("f",), cover_neck=False), log=lambda m: None)
 
     def neck_radii(result):
         body = M.read_mod3(piece(result, "body"))
@@ -477,3 +478,11 @@ def test_arms_copy_the_game_armors_twist_weighting(built):
                 assert share == pytest.approx(t[i], abs=0.12), (t[i], share)
                 checked += 1
     assert checked > 10
+
+
+def test_face_details_are_not_skin():
+    from vroidhunter.build import material_kind
+    for name in ("N00_000_00_FaceBrow_00_FACE", "N00_000_00_FaceEyelash_00_FACE", "N00_000_00_FaceMouth_00_FACE"):
+        assert material_kind(name) != "skin", name
+    assert material_kind("N00_000_00_Face_00_SKIN") == "skin"
+    assert material_kind("N00_000_00_Body_00_SKIN") == "skin"

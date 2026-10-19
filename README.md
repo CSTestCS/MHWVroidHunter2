@@ -105,7 +105,7 @@ checked against known checksums. You can also pick the file yourself.
 ## Command line
 
 ```
-VRoidHunter install  avatar.vrm [--game DIR] [--armor pl001_0000] [--no-physics] [--no-neck-cover] [--hunter-proportions] [--height 1.0] [--female-only]
+VRoidHunter install  avatar.vrm [--game DIR] [--armor pl123_0000] [--no-physics] [--no-neck-cover] [--hunter-proportions] [--height 1.0] [--female-only]
                      [--oodle PATH | --download-oodle]
 VRoidHunter export   avatar.vrm OUTDIR [same options]
 VRoidHunter uninstall [--game DIR]

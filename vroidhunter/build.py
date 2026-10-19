@@ -26,8 +26,9 @@ KNOWN_ARMOR = {
     "pl092_0000": "Guildwork",
     "pl094_0000": "Guild Palace",
     "pl121_0000": "Defender",
+    "pl123_0000": "Silver Knight",
 }
-DEFAULT_ARMOR = "pl001_0000"
+DEFAULT_ARMOR = "pl123_0000"
 PARTS = ("helm", "body", "arm", "wst", "leg")
 MAX_VERTS = 0xFFFF
 
@@ -177,6 +178,8 @@ def material_kind(name):
         return "hair"
     if "EYE" in n and "BROW" not in n and "LASH" not in n:
         return "eye"
+    if any(k in n for k in ("BROW", "LASH", "MOUTH", "HIGHLIGHT", "TOOTH", "TEETH")):
+        return "cloth"   # painted face details: not skin, often cut out
     if "SKIN" in n or "FACE" in n or ("BODY" in n and "CLOTH" not in n):
         return "skin"
     return "cloth"
@@ -383,23 +386,8 @@ def _extra_templates(game, gender, armor):
 SKIN_CB = "CBMhMaterialPLSkinLocal__disclosure"
 
 
-def _skin_templates(game, gender, log, limit=80):
-    """Materials using the game's player-skin shader (face model first, then armor sets)."""
-    paths = [p for p in game.listdir("pl\\%s_face\\face000\\" % gender) if p.lower().endswith(".mrl3")]
-    paths += [p for p in game.listdir("pl\\%s_equip\\" % gender) if p.lower().endswith(".mrl3")][:limit]
-    out = []
-    for p in paths:
-        try:
-            mrl = R.read_mrl3(game.read(p))
-        except Exception:
-            continue
-        found = [(m, mrl) for m in mrl.materials if SKIN_CB in R.cbuffer_names(m) and _template_score(m) is not None]
-        out += found
-        if len(out) >= 4:
-            break
-    if out:
-        log("  skin uses the game's player skin material")
-    return out
+def _roles(m):
+    return {R.slot_role(b.map_type)[0] for b in m.bindings if (b.res_type & 0xF) == R.RES_TEXTURE}
 
 
 def _template_score(m):
@@ -428,10 +416,11 @@ def _template_score(m):
     return score
 
 
-def _template_material(piece, name_hash, candidates=(), kind="cloth"):
+def _template_material(piece, name_hash, candidates=(), cutout=False):
     """(material, its mrl3, mesh header) to clone for this piece's VRM materials.
 
-    Skin prefers the game's own player-skin shader; everything else a plain player material."""
+    Always a plain player material. The game's player-skin shader is never used: the
+    game swaps the hunter's own skin texture into it (and it has no alpha cutout)."""
     ref, mrl = piece.ref, piece.mrl
     idx = _pick_reference_mesh(ref)
     header = ref.meshes[idx] if idx is not None else {}
@@ -441,8 +430,10 @@ def _template_material(piece, name_hash, candidates=(), kind="cloth"):
         sc = _template_score(m)
         if sc is None:
             continue
-        is_skin = SKIN_CB in R.cbuffer_names(m)
-        sc += 250 if (kind == "skin" and is_skin) else (-250 if is_skin else 0)
+        if SKIN_CB in R.cbuffer_names(m):
+            continue
+        if cutout and "alpha" in _roles(m):
+            sc += 40
         if owner is mrl:
             sc += 1   # prefer the piece's own material on ties
         if best_score is None or sc > best_score:
@@ -515,9 +506,10 @@ def _write_materials(piece, model, texset, opts, tex_cache, name_hash, candidate
     inverse = {v: k for k, v in piece.mat_lookup.items()}
     for local_index, name in enumerate(piece.mat_names):
         texs = _material_textures(model, inverse[local_index], texset, opts, tex_cache)
-        if texs.kind not in templates:
-            templates[texs.kind] = _template_material(piece, name_hash, candidates, texs.kind)
-        template, ref_mrl, _ = templates[texs.kind]
+        cutout = texs.alpha_pixels is not None
+        if cutout not in templates:
+            templates[cutout] = _template_material(piece, name_hash, candidates, cutout)
+        template, ref_mrl, _ = templates[cutout]
         m = template.clone()
         m.fields[1] = name_hash(name)
         R.set_fields(m, dict(BASE_PARAMS, **KIND_PARAMS[texs.kind], **wet))
@@ -1168,8 +1160,6 @@ def build(vrm_path, game, opts=None, log=print):
             head_funcs |= {f for c in helm.chains for f in c["funcs"]}
         candidates = [(m, pc.mrl) for pc in pieces for m in pc.mrl.materials]
         candidates += _extra_templates(game, gender, armor)
-        if not any(SKIN_CB in R.cbuffer_names(m) for m, _ in candidates):
-            candidates += _skin_templates(game, gender, log)
         ref_sign = _reference_winding(body.ref)
         culled = 0
         for pi, prim in enumerate(model.primitives):
