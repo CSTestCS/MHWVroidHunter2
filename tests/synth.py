@@ -236,13 +236,17 @@ def make_vrm(version=0, facing=+1, leg_scale=1.0, arm_scale=1.0):
                                     "humanoid": {"humanBones": [{"bone": n, "node": index[n]} for n in names]},
                                     "secondaryAnimation": {"boneGroups": [
                                         {"stiffiness": 1.0, "gravityPower": 0, "dragForce": 0.4,
-                                         "hitRadius": 0.02, "bones": [hair_index]}]}}}
+                                         "hitRadius": 0.02, "bones": [hair_index], "colliderGroups": [0]}],
+                                        "colliderGroups": [{"node": index["head"], "colliders": [
+                                            {"offset": {"x": 0, "y": 0.08, "z": 0}, "radius": 0.09}]}]}}}
     else:
         js["extensions"] = {"VRMC_vrm": {"specVersion": "1.0", "meta": {"name": "Test Avatar"},
                                          "humanoid": {"humanBones": {n: {"node": index[n]} for n in names}}},
                              "VRMC_springBone": {"specVersion": "1.0", "springs": [
                                  {"name": "hair", "joints": [{"node": hair_index, "stiffness": 1.0},
-                                                             {"node": hair2_index, "stiffness": 1.0}]}]}}
+                                                             {"node": hair2_index, "stiffness": 1.0}]}],
+                                 "colliders": [{"node": index["head"], "shape": {"sphere": {
+                                     "offset": [0, 0.08, 0], "radius": 0.09}}}]}}
     js_bytes = json.dumps(js).encode()
     while len(js_bytes) % 4:
         js_bytes += b" "
@@ -300,7 +304,7 @@ def _colmajor(m):
 
 
 def make_hunter_mod3(bones, material_names=("Ch_Pl_Body_Mt",), flip_winding=False, offset=(0, 0, 0),
-                     box=((-15, 15), (-10, 10), (95, 145))):
+                     box=((-15, 15), (-10, 10), (95, 145)), weight_func=2):
     funcs = sorted(bones)
     index = {f: i for i, f in enumerate(funcs)}
     world = {f: np.array(bones[f][1], float) + offset for f in funcs}
@@ -351,32 +355,47 @@ def make_hunter_mod3(bones, material_names=("Ch_Pl_Body_Mt",), flip_winding=Fals
         F = F[:, [0, 2, 1]]
     nrm = (cube - center) / np.linalg.norm(cube - center, axis=1, keepdims=True)
     part = M.MeshPart(0, cube, nrm, np.tile([1.0, 0, 0, 1], (8, 1)), np.zeros((8, 2)),
-                      np.full((8, 4), index[2]), np.tile([1.0, 0, 0, 0], (8, 1)), F)
+                      np.full((8, 4), index[weight_func]), np.tile([1.0, 0, 0, 0], (8, 1)), F)
     tmpl = dict(shadowCast=0x13, visibleCondition=0, weightDynamics=25, unkn3=0, unknownIndex=0,
                 mapData0=-1, mapData1=-1, intUnknown=0)
     data = M.write_mod3(ref, [part], list(material_names), M.BLOCK_SKIN4_1UV, tmpl)
     return data
 
 
-def make_hunter_mrl3(material_names=("Ch_Pl_Body_Mt",), tex_dir="pl\\f_equip\\pl001_0000\\body\\tex\\"):
+def make_hunter_mrl3(material_names=("Ch_Pl_Body_Mt",), tex_dir="pl\\f_equip\\pl001_0000\\body\\tex\\",
+                     metal_first=False):
+    """Player materials with the real PL constant buffer layout.
+
+    metal_first: put a shiny metal material (film + metalness, no wetness) first, like a
+    plate-armor set would have, to check that a plain material is preferred as template."""
     textures = [(0x241F5DEB, (0,) * 12, tex_dir + n) for n in
                 ("f_body001_BML", "f_body001_NM", "f_body001_RMT", "f_body001_CMM", "common_special")]
 
     def mt(name, low=0x123):
         return ((jamcrc(name) & 0xFFFFF) << 12) | low
 
+    def material(name, metal):
+        binds = [R.Binding(0, (0, 0, 0), mt("CBMhMaterialPLLocal__disclosure"), 0, 0)]
+        if not metal:
+            binds.append(R.Binding(0, (0, 0, 0), mt("CBMhMaterialGlobal"), 0, 0))
+        binds += [R.Binding(1, (0, 0, 0), mt("SSBase"), 0, 0),
+                  R.Binding(2, (0, 0, 0), mt("tAlbedoMap__disclosure"), 1, 0),
+                  R.Binding(2, (0, 0, 0), mt("tNormalMap__disclosure"), 2, 0),
+                  R.Binding(2, (0, 0, 0), mt("tRMTMap__disclosure"), 3, 0),
+                  R.Binding(2, (0, 0, 0), mt("tColorMaskMap__disclosure"), 4, 0),
+                  R.Binding(2, (0, 0, 0), mt("tSomeUnknownMap__disclosure"), 5, 0)]
+        m = R.Material([0x4516E7AB, jamcrc(name), 0xBEEF0000 + (1 if metal else 2), 0x1234, 0, 0, 0]
+                       + [0] * 9 + [0] + [0] * 15 + [0, 0], binds, bytes(336 + (0 if metal else 32)))
+        R.set_fields(m, {"fBaseMapFactor__uiColor": (1, 1, 1, 1), "bUseCMM": 1,
+                         "fMetalic__uiUNorm": 0.9 if metal else 0.0, "fFilmBlend__uiUNorm": 0.5 if metal else 0.0,
+                         "fMaterialWetBlend": 0.25})
+        return m
+
     materials = []
+    if metal_first:
+        materials.append(material("Ch_Pl_Metal_Mt", True))
     for name in material_names:
-        binds = [R.Binding(0, (0, 0, 0), mt("CBMhMaterialSlotLocal__disclosure"), 0, 0),
-                 R.Binding(1, (0, 0, 0), mt("SSBase"), 0, 0),
-                 R.Binding(2, (0, 0, 0), mt("tAlbedoMap__disclosure"), 1, 0),
-                 R.Binding(2, (0, 0, 0), mt("tNormalMap__disclosure"), 2, 0),
-                 R.Binding(2, (0, 0, 0), mt("tRMTMap__disclosure"), 3, 0),
-                 R.Binding(2, (0, 0, 0), mt("tColorMaskMap__disclosure"), 4, 0),
-                 R.Binding(2, (0, 0, 0), mt("tSomeUnknownMap__disclosure"), 5, 0)]
-        params = struct.pack("<16f", *([1.0] * 16))
-        fields = [0x4516E7AB, jamcrc(name), 0xDEADBEEF, 0x1234, 0, 0, 0] + [0] * 9 + [0] + [0] * 15 + [0, 0]
-        materials.append(R.Material(fields, binds, params))
+        materials.append(material(name, False))
     head = [R.MRL3_MAGIC, 12, 0, 0, 0, 80, 96, 132, 93, 0, 0, 0, 0, 0, 0, 0, 0]
     return R.write_mrl3(R.Mrl3(head, textures, materials))
 
@@ -404,11 +423,14 @@ def make_game_folder(root, armor="pl001_0000", genders=("f", "m"), flip_winding=
             with open(os.path.join(d, stem + ".mod3"), "wb") as f:
                 f.write(make_hunter_mod3(piece_bones, mats, flip_winding))
             with open(os.path.join(d, stem + ".mrl3"), "wb") as f:
-                f.write(make_hunter_mrl3(mats, "pl\\%s_equip\\%s\\%s\\tex\\" % (g, armor, part)))
+                f.write(make_hunter_mrl3(mats, "pl\\%s_equip\\%s\\%s\\tex\\" % (g, armor, part),
+                                         metal_first=(part == "body")))
         face = os.path.join(root, "pl", "%s_face" % g, "face000", "mod")
         os.makedirs(face, exist_ok=True)
         with open(os.path.join(face, "face000.mod3"), "wb") as f:
-            f.write(make_hunter_mod3(bones, ("Ch_Pl_Face_Mt",)))
+            # The hunter's own neck: a box around the neck bone, thicker than the avatar's neck.
+            f.write(make_hunter_mod3(bones, ("Ch_Pl_Face_Mt",), weight_func=3,
+                                     box=((-5, 5), (-5, 5), (np.array(bones[3][1])[2] - 6, np.array(bones[3][1])[2] + 6))))
     hair = os.path.join(root, "pl", "hair", "hair000", "mod")
     os.makedirs(hair, exist_ok=True)
     with open(os.path.join(hair, "hair000.mod3"), "wb") as f:

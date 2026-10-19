@@ -68,28 +68,59 @@ def default_template():
     return CtcTemplate(header, chain, bytes(first), node)
 
 
-def _node(template_node, function):
+NODE_RADIUS = 80         # float, collision radius (112-byte Iceborne nodes)
+CHAIN_COLLISION = 4      # byte: 4 = collide with the .ccl capsules, 0 = no collision
+
+
+def _frame(direction):
+    """Node frame with its X axis along the chain (as the community CTC tools build it)."""
+    import numpy as np
+    d = np.asarray(direction, dtype=np.float64)
+    n = np.linalg.norm(d)
+    m = np.eye(4)
+    if n < 1e-9:
+        return m
+    x = d / n
+    helper = np.array([0.0, 0.0, 1.0]) if abs(x[2]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    y = np.cross(helper, x)
+    y /= np.linalg.norm(y)
+    z = np.cross(x, y)
+    m[:3, 0], m[:3, 1], m[:3, 2] = x, y, z
+    return m
+
+
+def _node(template_node, function, direction=None, radius=None):
+    import numpy as np
     rec = bytearray(template_node)
-    ident = [1.0 if i == j else 0.0 for j in range(4) for i in range(4)]
-    struct.pack_into("<16f", rec, NODE_MATRIX, *ident)
+    m = _frame(direction) if direction is not None else np.eye(4)
+    struct.pack_into("<16f", rec, NODE_MATRIX, *m.T.reshape(16))   # stored column by column
     struct.pack_into("<i", rec, NODE_FUNCTION, function)
+    if radius is not None and len(rec) >= NODE_RADIUS + 4 and len(rec) == 112:
+        struct.pack_into("<f", rec, NODE_RADIUS, radius)
     return bytes(rec)
 
 
-def write_ctc(template, chains):
-    """chains: list of lists of bone function ids, anchor first."""
-    chains = [c for c in chains if len(c) >= 2]
+def write_ctc(template, chains, collide=True):
+    """chains: lists of bone function ids (anchor first), or dicts with keys
+    funcs, dirs (direction to the next node, per node) and radius."""
+    norm = []
+    for c in chains:
+        c = c if isinstance(c, dict) else {"funcs": list(c)}
+        if len(c["funcs"]) >= 2:
+            norm.append(c)
     header = bytearray(template.header)
-    struct.pack_into("<ii", header, 16, len(chains), sum(len(c) for c in chains))
+    struct.pack_into("<ii", header, 16, len(norm), sum(len(c["funcs"]) for c in norm))
     out = bytearray(header)
-    for c in chains:
+    for c in norm:
         rec = bytearray(template.chain)
-        struct.pack_into("<i", rec, 0, len(c))
+        struct.pack_into("<i", rec, 0, len(c["funcs"]))
+        rec[CHAIN_COLLISION] = 4 if collide else 0
         out += rec
-    for c in chains:
-        out += _node(template.first_node, c[0])
-        for f in c[1:]:
-            out += _node(template.node, f)
+    for c in norm:
+        dirs = c.get("dirs") or [None] * len(c["funcs"])
+        radius = c.get("radius")
+        for i, f in enumerate(c["funcs"]):
+            out += _node(template.first_node if i == 0 else template.node, f, dirs[i], radius)
     return bytes(out)
 
 

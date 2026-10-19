@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import ccl as CL
 from . import ctc as C
 from . import mod3 as M
 from . import mrl3 as R
@@ -38,6 +39,7 @@ class Options:
     height_scale: float = 1.0
     physics: bool = True
     keep_proportions: bool = True   # False: stretch the avatar onto the hunter's body shape
+    cover_neck: bool = True         # thicken the avatar's neck where the hunter's own neck would show
     max_texture: int = 2048
     double_sided: bool = True
     alpha_cull: bool = True
@@ -165,6 +167,37 @@ class MaterialTextures:
     black: str
     alpha: str
     alpha_pixels: object  # (h,w) alpha array of the albedo, or None
+    kind: str = "cloth"
+
+
+def material_kind(name):
+    """Rough surface type of a VRM material, from its name (VRoid names are consistent)."""
+    n = (name or "").upper()
+    if "HAIR" in n:
+        return "hair"
+    if "EYE" in n and "BROW" not in n and "LASH" not in n:
+        return "eye"
+    if "SKIN" in n or "FACE" in n or ("BODY" in n and "CLOTH" not in n):
+        return "skin"
+    return "cloth"
+
+
+# Roughness / metal / translucency / subsurface for the RMT texture, per surface type.
+KIND_RMT = {"skin": (150, 0, 0, 40), "hair": (120, 0, 0, 0), "eye": (90, 0, 0, 0), "cloth": (190, 0, 0, 0)}
+
+# VRoid colours are authored for toon shading, where white means "fully lit". Physically
+# based lighting needs albedo below ~85%, or bright areas glow in daylight.
+ALBEDO_SCALE = 0.85
+
+
+def _albedo_lut():
+    x = np.arange(256) / 255.0
+    lin = np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4) * ALBEDO_SCALE
+    out = np.where(lin <= 0.0031308, lin * 12.92, 1.055 * np.power(lin, 1 / 2.4) - 0.055)
+    return np.clip(np.round(out * 255), 0, 255).astype(np.uint8)
+
+
+_LUT = _albedo_lut()
 
 
 def _material_textures(model, mat_index, texset, opts, cache):
@@ -183,6 +216,7 @@ def _material_textures(model, mat_index, texset, opts, cache):
         rgba = np.full((8, 8, 4), 255, dtype=np.uint8)
     if not np.allclose(color, 1.0):
         rgba = np.clip(rgba.astype(np.float64) * color[None, None, :], 0, 255).astype(np.uint8)
+    rgba[:, :, :3] = _LUT[rgba[:, :, :3]]
     transparent = mat is not None and mat.alpha_mode != "OPAQUE"
     if transparent:
         albedo = texset.add(tag + "_BML", rgba, X.FMT_RGBA8_SRGB)
@@ -201,14 +235,15 @@ def _material_textures(model, mat_index, texset, opts, cache):
             normal = texset.add(tag + "_NM", out, X.FMT_RGBA8)
         except Exception:
             pass
-    rmt = texset.solid("vrh_matte_RMT", (220, 0, 0, 0))
+    kind = material_kind(mat.name if mat else "")
+    rmt = texset.solid("vrh_%s_RMT" % kind, KIND_RMT[kind])
     black = texset.solid("vrh_black", (0, 0, 0, 255))
     alpha_tex = texset.solid("vrh_white", (255, 255, 255, 255))
     if transparent:
         a = rgba[:, :, 3]
         alpha_tex = texset.add(tag + "_ALP", np.dstack([a, a, a, np.full_like(a, 255)]), X.FMT_RGBA8)
     result = MaterialTextures(albedo, normal, rmt, black, alpha_tex,
-                              rgba[:, :, 3].copy() if transparent else None)
+                              rgba[:, :, 3].copy() if transparent else None, kind)
     cache[mat_index] = result
     return result
 
@@ -322,20 +357,92 @@ def _nearest_present(f, present, parents):
     return next(iter(present))
 
 
-def _template_material(piece, name_hash):
+# Plain cloth/leather sets whose materials make good templates when the chosen set is
+# all metal (their materials are copied, never their textures).
+TEMPLATE_SETS = ("pl001_0000", "pl014_0000", "pl053_0000")
+
+
+def _extra_templates(game, gender, armor):
+    out = []
+    for other in TEMPLATE_SETS:
+        if other == armor:
+            continue
+        mods, mrls = _armor_files(game, gender, other)
+        for m in mrls:
+            if _part_of(m) != "body":
+                continue
+            try:
+                mrl = R.read_mrl3(game.read(m))
+            except Exception:
+                continue
+            out += [(mat, mrl) for mat in mrl.materials]
+    return out
+
+
+def _template_score(m):
+    """How well a game material suits a VRM surface: a plain, non-metal player material
+    that receives the game's wetness and has albedo, normal and RMT slots."""
+    roles = {R.slot_role(b.map_type)[0] for b in m.bindings if (b.res_type & 0xF) == R.RES_TEXTURE}
+    if "albedo" not in roles:
+        return None
+    names = R.cbuffer_names(m)
+    score = 0
+    if "CBMhMaterialPLLocal__disclosure" in names:
+        score += 100
+    if "CBMhMaterialGlobal" in names:
+        score += 30
+    if "normal" in roles and "rmt" in roles:
+        score += 20
+    if R.layout(m) is not None:
+        score += 10
+    for name, weight in (("fFilmBlend__uiUNorm", 25), ("fMetalic__uiUNorm", 15),
+                          ("fTranslucency__uiUNorm", 10), ("fRefractBlend__uiUNorm", 10)):
+        v = R.get_field(m, name)
+        if isinstance(v, float) and v > 0.05:
+            score -= weight
+    if "Fur" in " ".join(names) or "Uber" in " ".join(names):
+        score -= 40
+    return score
+
+
+def _template_material(piece, name_hash, candidates=()):
+    """(material, its mrl3, mesh header) to clone for this piece's VRM materials."""
     ref, mrl = piece.ref, piece.mrl
     idx = _pick_reference_mesh(ref)
     header = ref.meshes[idx] if idx is not None else {}
-    template = None
-    if header and header["materialIdx"] < len(ref.materials):
-        want = name_hash(ref.materials[header["materialIdx"]])
-        template = next((m for m in mrl.materials if m.name_hash == want), None)
-    if template is None:
-        template = next((m for m in mrl.materials
-                         if any(R.slot_role(b.map_type)[0] == "albedo" for b in m.bindings)), None)
-    if template is None and mrl.materials:
-        template = mrl.materials[0]
-    return template, header
+    pool = [(m, mrl) for m in mrl.materials] + list(candidates)
+    best, best_score = None, None
+    for m, owner in pool:
+        sc = _template_score(m)
+        if sc is None:
+            continue
+        if owner is mrl:
+            sc += 1   # prefer the piece's own material on ties
+        if best_score is None or sc > best_score:
+            best, best_score = (m, owner), sc
+    if best is None and mrl.materials:
+        best = (mrl.materials[0], mrl)
+    if best is None:
+        return None, mrl, header
+    return best[0], best[1], header
+
+
+# Material parameters for VRM surfaces (fields that a template doesn't have are skipped).
+BASE_PARAMS = {
+    "fBaseMapFactor__uiColor": (1.0, 1.0, 1.0, 1.0), "fEmissiveMapFactor__uiColor": (0.0, 0.0, 0.0),
+    "fMetalic__uiUNorm": 0.0, "fSpecular__uiUNorm": 0.5, "fTranslucency__uiUNorm": 0.0,
+    "bBaseColorEmissive": 0, "bUseCMM": 0, "fFilmBlend__uiUNorm": 0.0, "fRefractBlend__uiUNorm": 0.0,
+    "fEmissiveBlendColorBlend__uiUNorm": 0.0, "fDetailNormalBlend__uiUNorm": 0.0, "bUseWaveEmit": 0,
+    "fAddColorA__uiColor": (0.0, 0.0, 0.0, 0.0), "fAddColorB__uiColor": (0.0, 0.0, 0.0, 0.0),
+    "fAddColorC__uiColor": (0.0, 0.0, 0.0, 0.0), "fAddColorD__uiColor": (0.0, 0.0, 0.0, 0.0),
+    "bEmissive": 0,
+}
+KIND_PARAMS = {
+    "skin": {"fSubSurfaceBlend__uiUNorm": 0.5, "fRoughness__uiUNorm": 0.6},
+    "hair": {"fSubSurfaceBlend__uiUNorm": 0.0, "fRoughness__uiUNorm": 0.45},
+    "eye": {"fSubSurfaceBlend__uiUNorm": 0.0, "fRoughness__uiUNorm": 0.35},
+    "cloth": {"fSubSurfaceBlend__uiUNorm": 0.0, "fRoughness__uiUNorm": 0.75},
+}
 
 
 def _hash_function(ref, mrl):
@@ -346,12 +453,11 @@ def _hash_function(ref, mrl):
     return (lambda n: M.material_hash(n) & 0x7FFFFFFF) if masked else M.material_hash
 
 
-def _write_materials(piece, model, texset, opts, tex_cache, name_hash):
-    template, _ = _template_material(piece, name_hash)
+def _write_materials(piece, model, texset, opts, tex_cache, name_hash, candidates=()):
+    template, ref_mrl, _ = _template_material(piece, name_hash, candidates)
     if template is None:
         raise ValueError("no usable material found in " + piece.mrl_path)
-    ref_mrl = piece.mrl
-    new_mrl = R.Mrl3(list(ref_mrl.header), [], [])
+    new_mrl = R.Mrl3(list(piece.mrl.header), [], [])
     tex_index = {}
     tex_code = ref_mrl.textures[0][0] if ref_mrl.textures else 0x241F5DEB
     tex_unkn = ref_mrl.textures[0][1] if ref_mrl.textures else (0,) * 12
@@ -367,6 +473,7 @@ def _write_materials(piece, model, texset, opts, tex_cache, name_hash):
         texs = _material_textures(model, inverse[local_index], texset, opts, tex_cache)
         m = template.clone()
         m.fields[1] = name_hash(name)
+        R.set_fields(m, dict(BASE_PARAMS, **KIND_PARAMS[texs.kind]))
         for b in m.bindings:
             if (b.res_type & 0xF) != R.RES_TEXTURE:
                 continue
@@ -401,6 +508,7 @@ class PlannedChain:
     funcs: list            # bone function per kept node
     end_func: int
     weight: float          # total vertex weight on the chain (for prioritising)
+    radius: float = 0.02   # VRM hit radius (metres, scaled later)
 
 
 def _node_weights(model):
@@ -422,7 +530,7 @@ def _plan_physics(model, used_funcs, max_new_bones, log):
     for sc in model.springs:
         wsum = sum(weights.get(n, 0.0) for n in sc.nodes)
         if wsum > 0:
-            chains.append([list(sc.nodes), wsum])
+            chains.append([list(sc.nodes), wsum, sc.radius])
     if not chains or budget < 2:
         return [], {}
 
@@ -444,9 +552,9 @@ def _plan_physics(model, used_funcs, max_new_bones, log):
     ids = iter(free)
     planned, node_funcs = [], {}
     total = sum(len(sc.nodes) for sc in model.springs)
-    for kept, wsum in chains:
+    for kept, wsum, radius in chains:
         funcs = [next(ids) for _ in kept]
-        planned.append(PlannedChain(kept, funcs, next(ids), wsum))
+        planned.append(PlannedChain(kept, funcs, next(ids), wsum, radius))
         node_funcs.update(zip(kept, funcs))
     # Joints that were thinned out follow the nearest kept joint above them.
     for sc in model.springs:
@@ -459,6 +567,190 @@ def _plan_physics(model, used_funcs, max_new_bones, log):
     kept_total = sum(len(c.nodes) for c in planned)
     log("  physics: %d chains, %d of %d spring joints simulated" % (len(planned), kept_total, total))
     return planned, node_funcs
+
+
+AUTO_CAPSULES = ((1, 2), (2, 3), (6, 7), (10, 11), (7, 8), (11, 12), (14, 15), (18, 19), (15, 16), (19, 20))
+
+
+def _seg_distance(p, a, b):
+    ab = b - a
+    t = np.clip((p - a) @ ab / max(float(ab @ ab), 1e-12), 0, 1)
+    return np.linalg.norm(p - (a + np.outer(t, ab)), axis=1)
+
+
+def _capsules(model, fit, ref, log):
+    """Collision capsules for the avatar's physics, on base bones of `ref`."""
+    worlds = ref.bone_world_matrices()
+    index = ref.function_to_index()
+
+    def local(f, p):
+        return (np.linalg.inv(worlds[index[f]]) @ np.append(p, 1.0))[:3]
+
+    caps = []
+    if model.colliders:
+        for c in model.colliders:
+            f = fit.bone_function.get(fit.node_bone.get(c.node))
+            if f not in index:
+                continue
+            w = model.world[c.node]
+            p0 = fit.map_point(c.node, (w @ np.append(c.offset, 1.0))[:3])
+            p1 = fit.map_point(c.node, (w @ np.append(c.tail, 1.0))[:3]) if c.tail is not None else p0
+            r = c.radius * fit.scale
+            caps.append((f, local(f, p0), r, f, local(f, p1), r))
+        log("  collision: %d colliders from the VRM" % len(caps))
+        return caps
+    # No colliders in the VRM: fit capsules around the avatar's own body.
+    pts, fns = [], []
+    for pi, prim in enumerate(model.primitives):
+        mat = model.materials[prim.material] if 0 <= prim.material < len(model.materials) else None
+        if mat is not None and material_kind(mat.name) == "hair":
+            continue
+        strong = fit.weights[pi][:, 0] > 0.6
+        pts.append(fit.positions[pi][strong])
+        fns.append(fit.functions[pi][strong, 0])
+    if not pts:
+        return caps
+    pts, fns = np.vstack(pts), np.concatenate(fns)
+    for fa, fb in AUTO_CAPSULES:
+        if fa not in index or fb not in index:
+            continue
+        sel = pts[fns == fa]
+        if len(sel) < 8:
+            continue
+        a, b = worlds[index[fa]][:3, 3], worlds[index[fb]][:3, 3]
+        r = float(np.median(_seg_distance(sel, a, b))) * 0.95
+        if r > 0:
+            caps.append((fa, local(fa, a), r, fb, local(fb, b), r))
+    head = pts[fns == 4]
+    if 4 in index and len(head) >= 8:
+        lo, hi = head.min(axis=0), head.max(axis=0)
+        c = (lo + hi) / 2
+        r = 0.45 * float(np.min(hi - lo))
+        caps.append((4, local(4, c), r, 4, local(4, c), r))
+    log("  collision: %d capsules fitted to the avatar's body" % len(caps))
+    return caps
+
+
+def _hunter_neck_points(game, gender, skeleton_ref):
+    """The hunter's own face/neck model posed on our (moved) skeleton: its neck points."""
+    mods = [p for p in game.listdir("pl\\%s_face\\face000\\" % gender) if p.lower().endswith(".mod3")]
+    best = None
+    for p in mods:
+        try:
+            ref = M.read_mod3(game.read(p))
+        except Exception:
+            continue
+        if best is None or ref.header["vertexCount"] > best.header["vertexCount"]:
+            best = ref
+    if best is None or not best.bones:
+        return None
+    face_w = best.bone_world_matrices()
+    ours = skeleton_ref.bone_world_matrices()
+    our_index = skeleton_ref.function_to_index()
+    # Per face-model bone: matrix taking it from the hunter's rest pose onto our skeleton.
+    moves = []
+    for i, b in enumerate(best.bones):
+        j = our_index.get(b.function)
+        moves.append(np.eye(4) if j is None else ours[j] @ np.linalg.inv(face_w[i]))
+    moves = np.array(moves)
+    out = []
+    for m in range(len(best.meshes)):
+        skin = best.mesh_skin(m)
+        if skin is None:
+            continue
+        pos, ids, w = skin
+        ids = np.clip(ids, 0, len(moves) - 1)
+        homo = np.hstack([pos, np.ones((len(pos), 1))])
+        posed = np.einsum("nk,nkij,nj->ni", w, moves[ids], homo)[:, :3]
+        main = np.array([best.bones[i].function for i in ids[np.arange(len(ids)), w.argmax(axis=1)]])
+        out.append(posed[main == 3])   # the neck itself, not the face or the chest
+    pts = np.vstack(out) if out else np.zeros((0, 3))
+    return pts if len(pts) else None
+
+
+def _cover_neck(model, fit, neck_pts, skeleton_ref, margin=0.4, max_growth=1.6):
+    """Push the avatar's neck surface out to just cover the hunter's neck. Returns moved count."""
+    index = skeleton_ref.function_to_index()
+    if neck_pts is None or 3 not in index or 4 not in index:
+        return 0
+    worlds = skeleton_ref.bone_world_matrices()
+    a, b = worlds[index[3]][:3, 3], worlds[index[4]][:3, 3]
+    axis = b - a
+    length = float(np.linalg.norm(axis))
+    if length < 1e-6:
+        return 0
+    axis /= length
+    ref = np.cross(axis, [1.0, 0.0, 0.0])
+    if np.linalg.norm(ref) < 0.1:
+        ref = np.cross(axis, [0.0, 1.0, 0.0])
+    ref /= np.linalg.norm(ref)
+    ref2 = np.cross(axis, ref)
+
+    def cyl(p):
+        d = p - a
+        h = d @ axis
+        radial = d - np.outer(h, axis)
+        r = np.linalg.norm(radial, axis=1)
+        ang = np.arctan2(radial @ ref2, radial @ ref)
+        return h, r, ang, radial
+
+    nb_h, nb_a = 12, 24
+    hh, rr, aa, _ = cyl(neck_pts)
+    # Work in the height range the hunter's neck actually spans, near our neck bone.
+    h0 = max(float(hh.min()), -1.0 * length) - 1e-6
+    h1 = min(float(hh.max()), 1.2 * length) + 1e-6
+    if h1 <= h0:
+        return 0
+    keep = (hh >= h0) & (hh <= h1)
+    if not np.any(keep):
+        return 0
+    hb = np.clip(((hh[keep] - h0) / (h1 - h0) * nb_h).astype(int), 0, nb_h - 1)
+    ab = ((aa[keep] + np.pi) / (2 * np.pi) * nb_a).astype(int) % nb_a
+    need = np.zeros((nb_h, nb_a))
+    np.maximum.at(need, (hb, ab), rr[keep])
+    # Fill gaps (coarse meshes leave empty cells): around each ring, then between rings.
+    cols = np.arange(nb_a)
+    for i in range(nb_h):
+        have = need[i] > 0
+        if have.any() and not have.all():
+            need[i] = np.interp(cols, cols[have], need[i][have], period=nb_a)
+    rows = np.arange(nb_h)
+    filled = need.max(axis=1) > 0
+    if filled.sum() >= 2:
+        lo, hi = rows[filled].min(), rows[filled].max()
+        for j in range(nb_a):
+            inner = (rows >= lo) & (rows <= hi)
+            need[inner, j] = np.interp(rows[inner], rows[filled], need[filled, j])
+    # Smooth: each cell needs the most of itself and its neighbours.
+    grown = need.copy()
+    for dh in (-1, 0, 1):
+        for da in (-1, 0, 1):
+            grown = np.maximum(grown, np.roll(np.roll(need, dh, axis=0), da, axis=1) * (1 if dh == 0 else 0.97))
+    typical = float(np.median(rr[keep]))
+    moved = 0
+    for pi, prim in enumerate(model.primitives):
+        mat = model.materials[prim.material] if 0 <= prim.material < len(model.materials) else None
+        if mat is not None and material_kind(mat.name) == "hair":
+            continue
+        pos = fit.positions[pi]
+        main = fit.functions[pi][:, 0]
+        cand = main == 3
+        if not np.any(cand):
+            continue
+        h, r, ang, radial = cyl(pos)
+        inside = cand & (h >= h0) & (h <= h1) & (r < 2.5 * typical) & (r > 1e-6)
+        if not np.any(inside):
+            continue
+        hbin = np.clip(((h - h0) / (h1 - h0) * nb_h).astype(int), 0, nb_h - 1)
+        abin = ((ang + np.pi) / (2 * np.pi) * nb_a).astype(int) % nb_a
+        # Never more than max_growth times thicker, so the neck keeps its character.
+        target = np.minimum(grown[hbin, abin] + margin, r * max_growth)
+        push = inside & (grown[hbin, abin] > 0) & (r < target)
+        if np.any(push):
+            scale = (target[push] / r[push])[:, None]
+            pos[push] = a + np.outer(h[push], axis) + radial[push] * scale
+            moved += int(push.sum())
+    return moved
 
 
 def _ctc_template(game, mods):
@@ -484,11 +776,6 @@ def _sibling(game, mod_path, ext):
     files = [p for p in game.listdir(folder + "\\") if p.lower().endswith(ext)]
     exact = [p for p in files if p.rsplit("\\", 1)[1].rsplit(".", 1)[0].lower() == stem]
     return (exact or files or [None])[0]
-
-
-def _same_base_skeleton(a, b):
-    n = min(len(a.bones), len(b.bones))
-    return n > 0 and [x.function for x in a.bones[:n]] == [x.function for x in b.bones[:n]]
 
 
 # ---------------------------------------------------------------------------
@@ -683,8 +970,12 @@ def build(vrm_path, game, opts=None, log=print):
                     tip = pos[-1] + step * 0.5
                 new.append((chain.end_func, parent, tip))
                 sk.parent[chain.end_func] = parent
+                pts = pos + [tip]
+                dirs = [pts[i + 1] - pts[i] for i in range(len(pts) - 1)]
+                dirs.append(dirs[-1])
+                target.chains.append({"funcs": [*chain.funcs, chain.end_func], "dirs": dirs,
+                                      "radius": max(chain.radius * fit.scale, 0.3)})
             target.ref = M.extend_skeleton(target.ref, new)
-            target.chains = [[*c.funcs, c.end_func] for c, _a in chains]
         for pc in pieces:
             pc.funcs = {b.function for b in pc.ref.bones}
 
@@ -695,9 +986,17 @@ def build(vrm_path, game, opts=None, log=print):
                 tex_dir = tex_dir[:-4] + "\\tex"
             texset = TextureSet(tex_dir + "\\vroidhunter", with_ext)
 
+        if opts.cover_neck:
+            neck = _hunter_neck_points(game, gender, body.ref)
+            moved = _cover_neck(model, fit, neck, body.ref)
+            if moved:
+                log("  thickened the neck slightly (%d vertices) so your hunter's own neck stays hidden" % moved)
+
         head_funcs = {f for f in (fit.bone_function.get(b) for b in HEAD_BONES) if f is not None}
         if helm is not None:
-            head_funcs |= {f for chains in getattr(helm, "chains", []) for f in chains}
+            head_funcs |= {f for c in helm.chains for f in c["funcs"]}
+        candidates = [(m, pc.mrl) for pc in pieces for m in pc.mrl.materials]
+        candidates += _extra_templates(game, gender, armor)
         ref_sign = _reference_winding(body.ref)
         culled = 0
         for pi, prim in enumerate(model.primitives):
@@ -768,27 +1067,30 @@ def build(vrm_path, game, opts=None, log=print):
             if not pc.parts:
                 continue
             name_hash = _hash_function(pc.ref, pc.mrl)
-            _, header = _template_material(pc, name_hash)
+            _, _, header = _template_material(pc, name_hash)
             blocktype = M.BLOCK_SKIN4_1UV
             if header and M.BLOCK_TYPES[header["blocktype"]]["weights"] == 8:
                 blocktype = M.BLOCK_SKIN8_1UV
-            result.files[pc.mrl_path] = _write_materials(pc, model, texset, opts, tex_cache, name_hash)
+            result.files[pc.mrl_path] = _write_materials(pc, model, texset, opts, tex_cache, name_hash,
+                                                         candidates)
             result.files[pc.path] = M.write_mod3(pc.ref, pc.parts, pc.mat_names, blocktype, header)
             log("  %s: %d mesh parts, %d vertices" % (pc.path.rsplit("\\", 1)[-1], len(pc.parts),
                                                      sum(len(p.positions) for p in pc.parts)))
-            chains = getattr(pc, "chains", [])
-            if chains:
+            if pc.chains:
                 if template is None:
                     template, source = _ctc_template(game, mods)
                     log("  physics tuning copied from %s" % (source or "built-in defaults"))
                 stem = pc.path.rsplit(".", 1)[0]
+                # Our own colliders replace the armor's: its capsules fit the armor, not the avatar.
+                capsules = _capsules(model, fit, pc.ref, log if pc is body else (lambda m: None))
+                ccl_src = _sibling(game, pc.path, ".ccl") or _sibling(game, body.path, ".ccl")
+                unknowns = CL.template_unknowns(game.read(ccl_src)) if ccl_src else ((0,) * 8, (0,) * 4)
                 ctc_path = _sibling(game, pc.path, ".ctc") or stem + ".ctc"
-                result.files[ctc_path] = C.write_ctc(template, chains)
-                if _sibling(game, pc.path, ".ccl") is None and pc is not body:
-                    body_ccl = _sibling(game, body.path, ".ccl")
-                    if body_ccl and _same_base_skeleton(pc.ref, body.ref):
-                        result.files[stem + ".ccl"] = game.read(body_ccl)
-                log("  %s: %d physics chains" % (ctc_path.rsplit("\\", 1)[-1], len(chains)))
+                ccl_path = _sibling(game, pc.path, ".ccl") or stem + ".ccl"
+                result.files[ctc_path] = C.write_ctc(template, pc.chains, collide=bool(capsules))
+                result.files[ccl_path] = CL.write_ccl(capsules, unknowns)
+                log("  %s: %d physics chains, %d collision capsules" % (
+                    ctc_path.rsplit("\\", 1)[-1], len(pc.chains), len(capsules)))
 
         # Armor pieces the avatar doesn't use draw nothing, so they don't poke through.
         hidden = 0

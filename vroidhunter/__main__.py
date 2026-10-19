@@ -31,6 +31,8 @@ def _cli(argv):
                        help="use a folder of already-extracted game files instead of reading chunks")
         p.add_argument("--armor", default=DEFAULT_ARMOR)
         p.add_argument("--no-physics", action="store_true", help="don't convert spring bones to physics")
+        p.add_argument("--no-neck-cover", action="store_true",
+                       help="don't thicken the avatar's neck to hide the hunter's own neck")
         p.add_argument("--hunter-proportions", action="store_true",
                        help="stretch the avatar onto the hunter's build instead of keeping its proportions")
         p.add_argument("--oodle", default=None, help="path to oo2core_8_win64.dll (or oo2core_9)")
@@ -75,6 +77,7 @@ def _cli(argv):
 
     opts = Options(armor=args.armor, genders=("f",) if args.female_only else ("f", "m"),
                    physics=not args.no_physics, keep_proportions=not args.hunter_proportions,
+                   cover_neck=not args.no_neck_cover,
                    height_scale=args.height)
     gf = files()
     try:

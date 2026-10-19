@@ -114,6 +114,7 @@ class FitResult:
     node_bone: dict = None          # node -> canonical humanoid ancestor
     bone_function: dict = None      # canonical humanoid bone -> hunter function
     joint_targets: dict = None      # hunter function -> new joint position (keep_proportions)
+    map_point: object = None        # (vrm node, world point in VRM rest space) -> hunter space
 
 
 class HunterSkeleton:
@@ -225,14 +226,15 @@ def fit_vrm(model, sk, height_scale=1.0, node_functions=None, keep_proportions=T
     I = np.eye(3)
     T = {}  # canonical bone name -> Affine, in the already globally-aligned space
 
-    def seg(b0, b1, f0, f1, rot, parent, stretch=True):
+    def seg(b0, b1, f0, f1, rot, parent, stretch=True, hunter_length=False):
         """Map avatar segment b0->b1 onto the hunter direction f0->f1.
 
         Keeping proportions, the segment starts where its parent put the joint and keeps
-        its length; otherwise it is snapped and stretched onto the hunter's joints."""
+        its length (hunter_length: takes the hunter's length instead); otherwise it is
+        snapped and stretched onto the hunter's joints."""
         if keep_proportions:
             start = parent.apply(V(b0)[None, :])[0]
-            return _segment(V(b0), V(b1), start, start + (sk.p(f1) - sk.p(f0)), rot, stretch=False)
+            return _segment(V(b0), V(b1), start, start + (sk.p(f1) - sk.p(f0)), rot, stretch=hunter_length)
         return _segment(V(b0), V(b1), sk.p(f0), sk.p(f1), rot, stretch)
 
     def place(b, f, rot, parent):
@@ -269,7 +271,9 @@ def fit_vrm(model, sk, height_scale=1.0, node_functions=None, keep_proportions=T
         rot = parent_rot
         for (b0, f0), (b1, f1) in zip(chain, chain[1:]):
             if b0 in H and b1 in H and sk.has(f0) and sk.has(f1):
-                T[b0] = seg(b0, b1, f0, f1, rot, parent)
+                # The one exception to keeping proportions: forearms take the hunter's
+                # length, so the wrist lands where the game's hand and twist bones expect it.
+                T[b0] = seg(b0, b1, f0, f1, rot, parent, hunter_length=(b0 == n("LowerArm")))
                 rot = T[b0].rot
                 parent = T[b0]
         # Hand: match the whole hand frame (finger direction + knuckle line).
@@ -389,6 +393,21 @@ def fit_vrm(model, sk, height_scale=1.0, node_functions=None, keep_proportions=T
     def joint(f):
         return joint_targets.get(f, sk.p(f))
 
+    # Twist bones sit at the same fraction along the moved arm as on the hunter's arm.
+    if keep_proportions:
+        for ids, up_id in ((LEFT, up_l), (RIGHT, up_r)):
+            others = [c for c in ids["upper"] if c != up_id]
+            for tw, a, b in [(ids["fore_twist"], ids["fore"], ids["hand"])] + \
+                    [(o, up_id, ids["fore"]) for o in others]:
+                if not (sk.has(tw) and sk.has(a) and sk.has(b)) or tw in joint_targets:
+                    continue
+                axis = sk.p(b) - sk.p(a)
+                length2 = float(axis @ axis)
+                if length2 < 1e-12:
+                    continue
+                t = float(np.clip((sk.p(tw) - sk.p(a)) @ axis / length2, 0.0, 1.0))
+                joint_targets[tw] = joint(a) + t * (joint(b) - joint(a))
+
     twist = {}
     for ids in (LEFT, RIGHT):
         tw = ids["fore_twist"]
@@ -444,8 +463,11 @@ def fit_vrm(model, sk, height_scale=1.0, node_functions=None, keep_proportions=T
     node_pos = np.array([transform_for(node_bone[i]).apply(nodes_w[i][None, :])[0]
                          for i in range(len(model.nodes))]) if model.nodes else np.zeros((0, 3))
     bone_function = {b: resolve_function(b) for b in set(node_bone.values())}
+    def map_point(node, point):
+        return transform_for(node_bone[node]).apply(to_hunter(np.asarray(point, float))[None, :])[0]
+
     return FitResult(out_pos, out_nrm, out_tan, out_fn, out_w, s, notes, node_pos, node_bone, bone_function,
-                     joint_targets)
+                     joint_targets, map_point)
 
 
 _PARENT = {

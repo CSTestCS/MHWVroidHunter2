@@ -204,7 +204,19 @@ def test_materials_link_up(built):
             for role in ("albedo", "normal", "rmt", "black"):
                 assert (roles[role] + ".tex").lower() in paths, role
             assert roles["unknown"].endswith("common_special")
-            assert m.params == struct.pack("<16f", *([1.0] * 16))
+            # Cloned from the plain player material (not the shiny metal one), and set up as
+            # a non-metal, non-dyeable surface that still gets the game's wetness.
+            assert m.fields[2] == 0xBEEF0002
+            assert "CBMhMaterialGlobal" in R.cbuffer_names(m)
+            assert R.get_field(m, "fMetalic__uiUNorm") == 0.0
+            assert R.get_field(m, "fFilmBlend__uiUNorm") == 0.0
+            assert R.get_field(m, "bUseCMM") == 0
+            assert R.get_field(m, "fMaterialWetBlend") == pytest.approx(0.25)   # left to the game
+        kinds = {n: R.get_field(m, "fSubSurfaceBlend__uiUNorm") for n, m in
+                 zip(mod.materials, sorted(mrl.materials, key=lambda m: mod.materials.index(
+                     next(x for x in mod.materials if jamcrc(x) == m.name_hash))))}
+        for n, sss in kinds.items():
+            assert sss == (0.5 if "SKIN" in n.upper() else 0.0), n
 
 
 def test_unused_pieces_are_invisible(built):
@@ -326,9 +338,12 @@ def test_keeps_avatar_proportions(tmp_path):
                           (np.array(hunter[14][1]) + np.array(hunter[18][1])) / 2, np.array(hunter[3][1]))
     assert skel == pytest.approx(avatar, rel=0.08)
     assert abs(skel - hunter_ratio) > 0.2
-    # Forearm / upper arm ratio follows the avatar too.
-    assert _ratio(at[7], at[8], at[6], at[7]) == pytest.approx(
-        _ratio(j["leftLowerArm"], j["leftHand"], j["leftUpperArm"], j["leftLowerArm"]), rel=0.08)
+    # Forearms are the one exception: they take the hunter's length so wrists line up.
+    hunter_fore = np.linalg.norm(np.array(hunter[8][1]) - np.array(hunter[7][1]))
+    assert np.linalg.norm(at[8] - at[7]) == pytest.approx(hunter_fore, rel=0.01)
+    assert np.linalg.norm(at[12] - at[11]) == pytest.approx(hunter_fore, rel=0.01)
+    # The forearm twist bone sits half-way along the moved forearm, like on the hunter.
+    assert np.allclose(at[81], (at[7] + at[8]) / 2, atol=0.5)
     # Still the hunter's height, standing on the ground, arms in the hunter's A-pose direction.
     assert at[4][2] == pytest.approx(hunter[4][1][2], abs=4)
     assert (at[16][2] + at[20][2]) / 2 == pytest.approx((hunter[16][1][2] + hunter[20][1][2]) / 2, abs=2)
@@ -340,8 +355,10 @@ def test_keeps_avatar_proportions(tmp_path):
         calf = pos[f[:, 0] == 15]
         if len(calf):
             assert np.linalg.norm(calf - at[15], axis=1).min() < 6
-    # Unmapped bones (the twist bone) follow their parent.
-    assert np.linalg.norm(at[81] - at[7]) < np.linalg.norm(at[8] - at[7])
+    # The upper arm keeps the avatar's own length (relative to the torso).
+    assert _ratio(at[6], at[7], (at[14] + at[18]) / 2, at[3]) == pytest.approx(
+        _ratio(j["leftUpperArm"], j["leftLowerArm"], (j["leftUpperLeg"] + j["rightUpperLeg"]) / 2, j["neck"]),
+        rel=0.08)
 
 
 def test_hunter_proportions_option_leaves_skeleton(tmp_path):
@@ -349,3 +366,93 @@ def test_hunter_proportions_option_leaves_skeleton(tmp_path):
     hunter = hunter_bones()
     for f in (6, 7, 8, 14, 15, 16):
         assert np.allclose(at[f], hunter[f][1], atol=1e-3)
+
+
+def test_physics_uses_the_avatars_own_colliders(built):
+    from vroidhunter import ccl as CL
+    result, files, _ = built
+    helm = M.read_mod3(piece(result, "helm"))
+    ccl = piece(result, "helm", "ccl")
+    assert ccl is not None, "our own collision file replaces the armor's"
+    caps = CL.read_ccl(ccl)
+    assert len(caps) == 1
+    fa, oa, ra, fb, ob, rb = caps[0]
+    assert fa == fb == 4                    # the VRM's head collider, on the head bone
+    scale = 147 / 1.40                      # hunter / avatar ankle-to-head height
+    assert ra == pytest.approx(0.09 * scale, rel=0.05)
+    worlds = helm.bone_world_matrices()
+    head = worlds[helm.function_to_index()[4]]
+    centre = (head @ np.append(oa, 1))[:3]
+    assert centre[2] == pytest.approx(head[2, 3] + 0.08 * scale, abs=2)
+    # Chains collide with it, and each node's frame points along the chain.
+    rec = piece(result, "helm", "ctc")
+    assert rec[C.HEADER_SIZE + C.CHAIN_COLLISION] == 4
+    nodes_at = C.HEADER_SIZE + C.CHAIN_SIZE
+    node_size = (len(rec) - nodes_at) // 3
+    by_func = helm.function_to_index()
+    fixed, funcs = C.read_chains(rec)[0]
+    for i in range(2):
+        m = np.array(struct.unpack_from("<16f", rec, nodes_at + node_size * i)).reshape(4, 4).T
+        a, b = worlds[by_func[funcs[i]]][:3, 3], worlds[by_func[funcs[i + 1]]][:3, 3]
+        assert np.dot(m[:3, 0], (b - a) / np.linalg.norm(b - a)) == pytest.approx(1, abs=1e-4)
+
+
+def test_auto_capsules_without_vrm_colliders(tmp_path):
+    from vroidhunter import ccl as CL
+    data, _ = make_vrm(0)
+    (tmp_path / "a.vrm").write_bytes(data)
+    make_game_folder(str(tmp_path / "g"), genders=("f",))
+    import vroidhunter.build as B
+    real = B.load_vrm
+
+    def no_colliders(path):
+        m = real(path)
+        m.colliders = []
+        return m
+
+    B.load_vrm = no_colliders
+    try:
+        result = build(str(tmp_path / "a.vrm"), FolderFiles(str(tmp_path / "g")), Options(genders=("f",)),
+                       log=lambda m: None)
+    finally:
+        B.load_vrm = real
+    caps = CL.read_ccl(piece(result, "helm", "ccl"))
+    bones = {c[0] for c in caps}
+    assert {2, 6, 10, 14} <= bones
+    assert all(c[2] > 0 for c in caps)
+
+
+def test_neck_covers_the_hunters_neck(tmp_path):
+    data, _ = make_vrm(0)
+    (tmp_path / "a.vrm").write_bytes(data)
+    make_game_folder(str(tmp_path / "g"), genders=("f",))
+    files = FolderFiles(str(tmp_path / "g"))
+    on = build(str(tmp_path / "a.vrm"), files, Options(genders=("f",)), log=lambda m: None)
+    off = build(str(tmp_path / "a.vrm"), files, Options(genders=("f",), cover_neck=False), log=lambda m: None)
+
+    def neck_radii(result):
+        body = M.read_mod3(piece(result, "body"))
+        w = body.bone_world_matrices()
+        idx = body.function_to_index()
+        a, b = w[idx[3]][:3, 3], w[idx[4]][:3, 3]
+        axis = (b - a) / np.linalg.norm(b - a)
+        out = []
+        for _, pos, _, wt, f, _ in gather(body):
+            sel = f[:, 0] == 3
+            d = pos[sel] - a
+            h = d @ axis
+            r = np.linalg.norm(d - np.outer(h, axis), axis=1)
+            out.append(r[(h > 0) & (h < 4)])
+        return np.concatenate(out)
+
+    before, after = neck_radii(off), neck_radii(on)
+    assert before.max() < 4            # the avatar's neck is thinner than the hunter's (5 units)
+    # Now it covers it, but never grows more than 1.6x (the test avatar's neck is very thin).
+    assert after.min() >= min(5 * 0.95, before.min() * 1.6 - 1e-6)
+    assert after.max() <= before.max() * 1.6 + 1e-6
+    # Nothing far from the neck moves.
+    b_off = M.read_mod3(piece(off, "body"))
+    b_on = M.read_mod3(piece(on, "body"))
+    for (_, p0, _, _, f0, _), (_, p1, _, _, f1, _) in zip(gather(b_off), gather(b_on)):
+        far = f0[:, 0] != 3
+        assert np.allclose(p0[far], p1[far])

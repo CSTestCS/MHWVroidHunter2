@@ -167,6 +167,38 @@ class Mod3:
         return pos, nrm, faces
 
 
+def _mesh_skin(self, mesh_index):
+    """(positions, bone indices (n,4), weights (n,4)) of a skinned reference mesh, or None."""
+    h = self.meshes[mesh_index]
+    info = BLOCK_TYPES.get(h["blocktype"])
+    if info is None or not info["weights"] or h["vertexCount"] == 0:
+        return None
+    stride = h["blockSize"]
+    start = self.header["vertexOffset"] + h["vertexOffset"] + stride * (h["vertexSub"] + h["vertexBase"])
+    count = h["vertexCount"]
+    raw = self.data[start:start + stride * count]
+    if len(raw) < stride * count:
+        return None
+    v = np.frombuffer(raw, dtype=np.uint8).reshape(count, stride)
+    pos = v[:, 0:12].copy().view("<f4").reshape(count, 3).astype(np.float64)
+    w_at = 20 + 4 * info["uvs"]
+    packed = v[:, w_at:w_at + 4].copy().view("<u4").ravel()
+    w = np.stack([(packed >> (10 * k)) & 1023 for k in range(3)], axis=1) / 1023.0
+    if info["weights"] == 4:
+        w = np.hstack([w, np.clip(1 - w.sum(axis=1, keepdims=True), 0, 1)])
+        ids = v[:, w_at + 4:w_at + 8].astype(np.int64)
+    else:
+        extra = v[:, w_at + 4:w_at + 7].astype(np.float64) / 255.0
+        w = np.hstack([w, extra[:, :1]])
+        ids = v[:, w_at + 8:w_at + 12].astype(np.int64)
+    total = w.sum(axis=1, keepdims=True)
+    total[total <= 0] = 1
+    return pos, ids, w / total
+
+
+Mod3.mesh_skin = _mesh_skin
+
+
 def read_mod3(data):
     r = Reader(data)
     vals = r.unpack(HEADER_FMT)

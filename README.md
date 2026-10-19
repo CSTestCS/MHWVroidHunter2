@@ -55,13 +55,24 @@ checked against known checksums. You can also pick the file yourself.
   the game's animations bend the avatar at its own elbows and knees. The game's
   height slider still scales it. (Untick *Keep the VRoid model's own proportions*
   to stretch the avatar onto the hunter's build instead.)
-* **Keeps the physics.** VRM spring bones (hair, skirts, ribbons, tails) become
-  MHW physics chains (`.ctc`), using tuning values from a hair physics file in your own game.
+* **Keeps the physics.** VRM spring bones (hair, skirts, ribbons, tails, chest)
+  become MHW physics chains (`.ctc`). Their collision (`.ccl`) is built from the
+  VRM's own colliders, or fitted to the avatar's body if it has none, so physics
+  only reacts to the avatar and not to the replaced armor's shape.
+* **Lines up the wrists.** Forearms are the one exception to keeping proportions:
+  they take the hunter's forearm length and the arm's twist bones are spaced to
+  match, so wrists don't twist or pinch in animations.
+* **Hides the hunter's own neck.** The game still draws your hunter's face and neck
+  under the helmet. Where it would poke out around a slimmer avatar neck, the
+  avatar's neck is thickened just enough to cover it (at most 1.6x), and nothing
+  else changes.
+* **Matches the game's lighting.** Materials are cloned from a plain, non-metal
+  player material that gets the game's wet effect. Skin, hair, eyes and cloth get
+  their own roughness, and skin gets subsurface scattering. Colours are toned to
+  the brightness range the game's lighting expects.
 * **Splits the avatar like real armor.** The head and hair go in the helmet
   model, the rest in the body model. Armor pieces the avatar doesn't need (arms,
   waist, legs) are made invisible so they don't poke through.
-* **Keeps the look.** Textures and materials come from the VRM, using the
-  armor's own shader settings.
 
 ## Limitations
 
@@ -91,7 +102,7 @@ checked against known checksums. You can also pick the file yourself.
 ## Command line
 
 ```
-VRoidHunter install  avatar.vrm [--game DIR] [--armor pl001_0000] [--no-physics] [--hunter-proportions] [--height 1.0] [--female-only]
+VRoidHunter install  avatar.vrm [--game DIR] [--armor pl001_0000] [--no-physics] [--no-neck-cover] [--hunter-proportions] [--height 1.0] [--female-only]
                      [--oodle PATH | --download-oodle]
 VRoidHunter export   avatar.vrm OUTDIR [same options]
 VRoidHunter uninstall [--game DIR]

@@ -161,3 +161,96 @@ def write_mrl3(mrl):
         out += blob
     pad_to(out, align(len(out)))
     return bytes(out)
+
+
+# ---------------------------------------------------------------------------
+# Constant buffer layouts (generated from CrazyT's MHW-Research, MIT licence)
+# ---------------------------------------------------------------------------
+
+_CBUFFERS = None
+
+
+def cbuffers():
+    global _CBUFFERS
+    if _CBUFFERS is None:
+        import json
+        from .chunk import _data_path
+        with open(_data_path("cbuffers.json")) as f:
+            _CBUFFERS = {int(k): v for k, v in json.load(f).items()}
+    return _CBUFFERS
+
+
+def layout(material):
+    """[(cbuffer name, offset in params, size)] or None if any block is unknown."""
+    out, pos = [], 0
+    table = cbuffers()
+    for b in material.bindings:
+        if (b.res_type & 0xF) != RES_CBUFFER:
+            continue
+        info = table.get(b.map_type >> 12)
+        if info is None:
+            return None
+        pos = align(pos)
+        out.append((info["name"], pos, info["size"]))
+        pos += info["size"]
+    if align(pos) != align(len(material.params)):
+        return None
+    return out
+
+
+_PACK = {"float": "f", "float2": "2f", "float3": "3f", "float4": "4f", "bool": "I", "uint": "I", "int": "i"}
+
+
+def get_field(material, name):
+    lay = layout(material)
+    if lay is None:
+        return None
+    for cb, off, _size in lay:
+        f = cbuffers_by_name().get(cb, {}).get("fields", {}).get(name)
+        if f:
+            fmt = "<" + _PACK.get(f[1], "f")
+            vals = struct.unpack_from(fmt, material.params, off + f[0])
+            return vals if len(vals) > 1 else vals[0]
+    return None
+
+
+def set_fields(material, values):
+    """Patch named parameters in place; unknown names or layouts are skipped."""
+    lay = layout(material)
+    if lay is None:
+        return 0
+    params = bytearray(material.params)
+    done = 0
+    for cb, off, _size in lay:
+        fields = cbuffers_by_name().get(cb, {}).get("fields", {})
+        for name, value in values.items():
+            f = fields.get(name)
+            if not f or f[1] not in _PACK:
+                continue
+            fmt = "<" + _PACK[f[1]]
+            vals = value if isinstance(value, (tuple, list)) else (value,)
+            if f[1] in ("bool", "uint", "int"):
+                vals = tuple(int(v) for v in vals)
+            struct.pack_into(fmt, params, off + f[0], *vals)
+            done += 1
+    material.params = bytes(params)
+    return done
+
+
+_BY_NAME = None
+
+
+def cbuffers_by_name():
+    global _BY_NAME
+    if _BY_NAME is None:
+        _BY_NAME = {v["name"]: v for v in cbuffers().values()}
+    return _BY_NAME
+
+
+def cbuffer_names(material):
+    lay = layout(material)
+    if lay is None:
+        table = cbuffers()
+        return [table.get(b.map_type >> 12, {}).get("name", "?") for b in material.bindings
+                if (b.res_type & 0xF) == RES_CBUFFER]
+    return [n for n, _o, _s in lay]

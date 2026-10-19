@@ -52,6 +52,15 @@ class SpringChain:
 
 
 @dataclass
+class Collider:
+    """A spring-bone collider: sphere (tail None) or capsule, in the node's local space."""
+    node: int
+    offset: tuple
+    radius: float
+    tail: object = None
+
+
+@dataclass
 class VrmModel:
     version: int
     nodes: list
@@ -64,6 +73,7 @@ class VrmModel:
     title: str = ""
     meta: dict = field(default_factory=dict)
     springs: list = field(default_factory=list)
+    colliders: list = field(default_factory=list)
 
     def bone_position(self, name):
         node = self.humanoid.get(name)
@@ -333,6 +343,30 @@ def _springs(js):
     return out
 
 
+def _colliders(js):
+    ext = js.get("extensions", {})
+    out = []
+    if "VRMC_springBone" in ext:
+        for c in ext["VRMC_springBone"].get("colliders", []):
+            shape = c.get("shape", {})
+            if "sphere" in shape:
+                sp = shape["sphere"]
+                out.append(Collider(c.get("node", -1), tuple(sp.get("offset", (0, 0, 0))), float(sp.get("radius", 0))))
+            elif "capsule" in shape:
+                cp = shape["capsule"]
+                out.append(Collider(c.get("node", -1), tuple(cp.get("offset", (0, 0, 0))), float(cp.get("radius", 0)),
+                                    tuple(cp.get("tail", (0, 0, 0)))))
+    elif "VRM" in ext:
+        for group in ext["VRM"].get("secondaryAnimation", {}).get("colliderGroups", []):
+            node = group.get("node", -1)
+            for c in group.get("colliders", []):
+                o = c.get("offset", {})
+                # VRM 0.x stores collider offsets in Unity's axes: flip Z for glTF.
+                out.append(Collider(node, (float(o.get("x", 0)), float(o.get("y", 0)), -float(o.get("z", 0))),
+                                    float(c.get("radius", 0))))
+    return [c for c in out if c.node is not None and c.node >= 0 and c.radius > 0]
+
+
 def compute_tangents(pos, nrm, uv, faces):
     tan = np.zeros_like(pos)
     bit = np.zeros_like(pos)
@@ -485,4 +519,6 @@ def load_vrm_bytes(data, base_dir="."):
     springs = [SpringChain([n for n in c.nodes if n not in human_nodes], c.stiffness, c.gravity, c.drag, c.radius)
                for c in springs]
     springs = [c for c in springs if c.nodes]
-    return VrmModel(version, nodes, parents, world, humanoid, prims, _materials(g), images, title, meta, springs)
+    colliders = [c for c in _colliders(js) if c.node < len(nodes)]
+    return VrmModel(version, nodes, parents, world, humanoid, prims, _materials(g), images, title, meta, springs,
+                    colliders)
