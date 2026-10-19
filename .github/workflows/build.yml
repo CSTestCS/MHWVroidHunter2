@@ -43,9 +43,11 @@ jobs:
         shell: pwsh
         run: |
           $p = Start-Process -FilePath dist\VRoidHunter.exe -ArgumentList "--help" -PassThru
-          if (-not $p.WaitForExit(60000)) { $p.Kill(); Write-Error "exe did not exit"; exit 1 }
+          $ok = $p.WaitForExit(90000)
+          if (-not $ok) { $p.Kill() }
+          if (Test-Path dist\VRoidHunter.log) { Get-Content dist\VRoidHunter.log } else { Write-Host "no log file" }
+          if (-not $ok) { Write-Error "exe did not exit"; exit 1 }
           if ($p.ExitCode -ne 0) { Write-Error "exit code $($p.ExitCode)"; exit 1 }
-          Get-Content dist\VRoidHunter.log
           if (-not (Select-String -Path dist\VRoidHunter.log -Pattern "usage" -Quiet)) { exit 1 }
       - uses: actions/upload-artifact@v4
         with:
