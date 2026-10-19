@@ -35,6 +35,8 @@ def _cli(argv):
         p.add_argument("--no-physics", action="store_true", help="don't convert spring bones to physics")
         p.add_argument("--no-neck-cover", action="store_true",
                        help="don't thicken the avatar's neck to hide the hunter's own neck")
+        p.add_argument("--no-expressions", action="store_true",
+                       help="don't weight the avatar's face to the hunter's facial animation bones")
         p.add_argument("--hunter-proportions", action="store_true",
                        help="stretch the avatar onto the hunter's build instead of keeping its proportions")
         p.add_argument("--oodle", default=None, help="path to oo2core_8_win64.dll (or oo2core_9)")
@@ -80,7 +82,7 @@ def _cli(argv):
     second = "" if args.second_armor.lower() in ("", "none") else args.second_armor
     opts = Options(armor=args.armor, second_armor=second, genders=("f",) if args.female_only else ("f", "m"),
                    physics=not args.no_physics, keep_proportions=not args.hunter_proportions,
-                   cover_neck=not args.no_neck_cover,
+                   cover_neck=not args.no_neck_cover, expressions=not args.no_expressions,
                    height_scale=args.height)
     gf = files()
     try:

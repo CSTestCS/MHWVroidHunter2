@@ -43,6 +43,7 @@ class Options:
     physics: bool = True
     keep_proportions: bool = True   # False: stretch the avatar onto the hunter's body shape
     cover_neck: bool = True         # thicken the avatar's neck where the hunter's own neck would show
+    expressions: bool = True        # weight the avatar's face to the hunter face's bones
     max_texture: int = 2048
     double_sided: bool = True
     alpha_cull: bool = True
@@ -672,18 +673,177 @@ def _capsules(model, fit, ref, log):
     return caps
 
 
-def _hunter_neck_points(game, gender, skeleton_ref):
-    """The hunter's own face/neck model posed on our (moved) skeleton: its neck points."""
-    mods = [p for p in game.listdir("pl\\%s_face\\face000\\" % gender) if p.lower().endswith(".mod3")]
+def _face_model(game, gender):
+    """The hunter's own face model (face000): the largest mod3 in its folder, or None."""
     best = None
-    for p in mods:
+    for p in game.listdir("pl\\%s_face\\face000\\" % gender):
+        if not p.lower().endswith(".mod3"):
+            continue
         try:
             ref = M.read_mod3(game.read(p))
         except Exception:
             continue
         if best is None or ref.header["vertexCount"] > best.header["vertexCount"]:
             best = ref
-    if best is None or not best.bones:
+    return best if best is not None and best.bones else None
+
+
+# ---------------------------------------------------------------------------
+# Facial expressions: copy the hunter face's own rig onto the avatar's head
+# ---------------------------------------------------------------------------
+
+FACE_WORDS = ("FACE", "EYE", "BROW", "LASH", "MOUTH", "TOOTH", "TEETH")
+
+
+def _is_face_material(name):
+    n = (name or "").upper()
+    return "HAIR" not in n and any(w in n for w in FACE_WORDS)
+
+
+def _face_bones(face_ref, body_funcs, taken):
+    """Indices of the face model's own bones (eyelids, brows, lips, jaw...), parents first.
+
+    These are bones the body skeleton doesn't have; their facial animations come from the
+    game. Bones whose ids clash with ones we already use are left out (with their children)."""
+    out, keep = [], set()
+    for i, b in enumerate(face_ref.bones):
+        f = b.function
+        if f in body_funcs:
+            continue
+        parent = b.parent if b.parent != 255 and b.parent < len(face_ref.bones) else None
+        if parent is None or f in taken or f >= M.REMAP_SIZE:
+            continue
+        pf = face_ref.bones[parent].function
+        if pf not in body_funcs and parent not in keep:
+            continue
+        keep.add(i)
+        out.append(i)
+    return out
+
+
+def _face_anchor(face_ref, i, body_funcs):
+    """Nearest ancestor of face bone i that the body skeleton has (usually the head)."""
+    seen = set()
+    while i is not None and i not in seen:
+        seen.add(i)
+        f = face_ref.bones[i].function
+        if f in body_funcs:
+            return i
+        p = face_ref.bones[i].parent
+        i = p if p != 255 and p < len(face_ref.bones) else None
+    return None
+
+
+def _face_rig(face_ref, our_ref, taken):
+    """New bones (function, parent function, world matrix) that carry the hunter's face rig
+    on our skeleton, plus the matrix taking face-model space onto it (via the head)."""
+    our_index = our_ref.function_to_index()
+    body_funcs = set(our_index)
+    ours = our_ref.bone_world_matrices()
+    theirs = face_ref.bone_world_matrices()
+    idx = _face_bones(face_ref, body_funcs, taken)
+    new, carry = [], None
+    for i in idx:
+        a = _face_anchor(face_ref, i, body_funcs)
+        if a is None:
+            continue
+        move = ours[our_index[face_ref.bones[a].function]] @ np.linalg.inv(theirs[a])
+        if carry is None or face_ref.bones[a].function == 4:
+            carry = move
+        b = face_ref.bones[i]
+        new.append((b.function, face_ref.bones[b.parent].function, move @ theirs[i]))
+    return new, carry
+
+
+def _transfer_face_weights(model, fit, face_ref, carry, face_funcs, head_func=4, k=4):
+    """Weight the avatar's face to the hunter face's bones, so the game's facial animations
+    (blinking, talking, expressions) move it. The hunter's face is matched to the avatar's
+    by fitting their bounding boxes, then each avatar face vertex copies the weights of
+    the nearest hunter face vertices. Returns the number of vertices changed."""
+    face_funcs = set(face_funcs)
+    # Hunter face vertices that move with the face bones, in our space.
+    hp, hw = [], []
+    for m in range(len(face_ref.meshes)):
+        skin = face_ref.mesh_skin(m)
+        if skin is None:
+            continue
+        pos, ids, w = skin
+        funcs = np.array([[face_ref.bones[int(j)].function if int(j) < len(face_ref.bones) else -1
+                           for j in row] for row in ids])
+        on_face = (w * np.isin(funcs, list(face_funcs))).sum(axis=1) > 0.05
+        if not on_face.any():
+            continue
+        homo = np.hstack([pos[on_face], np.ones((on_face.sum(), 1))])
+        hp.append((homo @ carry.T)[:, :3])
+        for row_f, row_w in zip(funcs[on_face], w[on_face]):
+            d = {}
+            for f, x in zip(row_f, row_w):
+                if x > 0 and f >= 0:
+                    d[int(f)] = d.get(int(f), 0.0) + float(x)
+            hw.append(d)
+    if not hp:
+        return 0
+    hp = np.vstack(hp)
+    # Avatar face vertices: face materials, held by the head.
+    targets = []
+    for pi, prim in enumerate(model.primitives):
+        mat = model.materials[prim.material] if 0 <= prim.material < len(model.materials) else None
+        if mat is None or not _is_face_material(mat.name):
+            continue
+        funcs, wts = fit.functions[pi], fit.weights[pi]
+        main = funcs[np.arange(len(funcs)), wts.argmax(axis=1)]
+        sel = np.nonzero(main == head_func)[0]
+        if len(sel):
+            targets.append((pi, sel))
+    if not targets:
+        return 0
+    ap = np.vstack([fit.positions[pi][sel] for pi, sel in targets])
+    lo_h, hi_h = np.percentile(hp, 2, axis=0), np.percentile(hp, 98, axis=0)
+    lo_a, hi_a = np.percentile(ap, 2, axis=0), np.percentile(ap, 98, axis=0)
+    span_a = np.where(hi_a - lo_a > 1e-6, hi_a - lo_a, 1.0)
+    mapped = (ap - lo_a) / span_a * (hi_h - lo_h) + lo_h
+    # How far a match may be: a fraction of the face, or more where the hunter mesh is sparse.
+    sample = hp[:: max(1, len(hp) // 500)]
+    d2s = ((sample[:, None, :] - sample[None, :, :]) ** 2).sum(axis=2)
+    np.fill_diagonal(d2s, np.inf)
+    spacing = float(np.median(np.sqrt(d2s.min(axis=1)))) if len(sample) > 1 else 0.0
+    reach = max(0.15 * float(np.linalg.norm(hi_h - lo_h)), 3.0 * spacing)
+    changed, row = 0, 0
+    for pi, sel in targets:
+        funcs, wts = fit.functions[pi], fit.weights[pi]
+        pts = mapped[row:row + len(sel)]
+        row += len(sel)
+        for start in range(0, len(sel), 512):
+            chunk = pts[start:start + 512]
+            d2 = ((chunk[:, None, :] - hp[None, :, :]) ** 2).sum(axis=2)
+            kk = min(k, len(hp))
+            near = np.argpartition(d2, kk - 1, axis=1)[:, :kk]
+            for r, v in enumerate(sel[start:start + 512]):
+                dist = np.sqrt(d2[r, near[r]])
+                if dist.min() > reach:
+                    continue
+                inv = 1.0 / np.maximum(dist, 1e-3)
+                acc = {}
+                for j, wj in zip(near[r], inv / inv.sum()):
+                    for f, x in hw[j].items():
+                        acc[f] = acc.get(f, 0.0) + x * wj
+                top = sorted(acc.items(), key=lambda t: -t[1])[:funcs.shape[1]]
+                total = sum(x for _, x in top)
+                if total <= 0 or not any(f in face_funcs for f, _ in top):
+                    continue
+                funcs[v] = 0
+                wts[v] = 0
+                for c, (f, x) in enumerate(top):
+                    funcs[v, c] = f
+                    wts[v, c] = x / total
+                changed += 1
+    return changed
+
+
+def _hunter_neck_points(game, gender, skeleton_ref):
+    """The hunter's own face/neck model posed on our (moved) skeleton: its neck points."""
+    best = _face_model(game, gender)
+    if best is None:
         return None
     face_w = best.bone_world_matrices()
     ours = skeleton_ref.bone_world_matrices()
@@ -1095,9 +1255,19 @@ def build(vrm_path, game, opts=None, log=print):
             used = set()
             for pc in pieces:
                 used |= {b.function for b in pc.ref.bones}
+            # Facial expressions: the hunter face's own bones, reserved before physics.
+            face_ref = _face_model(game, gender) if opts.expressions else None
+            face_count = 0
+            if face_ref is not None:
+                face_target = helm if helm is not None else body
+                have = {b.function for b in face_target.ref.bones}
+                face_count = len(_face_bones(face_ref, have, used - have))
+                used |= {face_ref.bones[i].function for i in _face_bones(face_ref, have, used - have)}
+                if face_count == 0 or len(face_target.ref.bones) + face_count > 230:
+                    face_ref, face_count = None, 0
             planned, node_funcs = [], {}
             if opts.physics and model.springs:
-                room = 255 - max(len(pc.ref.bones) for pc in pieces)
+                room = 255 - max(len(pc.ref.bones) for pc in pieces) - face_count
                 planned, node_funcs = _plan_physics(model, used, room, log)
 
             sk = _union_skeleton(pieces)
@@ -1148,6 +1318,19 @@ def build(vrm_path, game, opts=None, log=print):
                     target.chains.append({"funcs": [*chain.funcs, chain.end_func], "dirs": dirs,
                                           "radius": max(chain.radius * fit.scale, 0.3)})
                 target.ref = M.extend_skeleton(target.ref, new)
+            face_funcs = set()
+            if face_ref is not None:
+                taken = set()
+                for pc in pieces:
+                    taken |= {b.function for b in pc.ref.bones}
+                rig, carry = _face_rig(face_ref, face_target.ref, taken)
+                if rig and carry is not None and len(face_target.ref.bones) + len(rig) <= 255:
+                    face_target.ref = M.extend_skeleton(face_target.ref, rig)
+                    face_funcs = {f for f, _, _ in rig}
+                    moved = _transfer_face_weights(model, fit, face_ref, carry, face_funcs,
+                                                   fit.bone_function.get("head", 4))
+                    log("  facial expressions: %d face bones, %d face vertices follow them"
+                        % (len(rig), moved))
             for pc in pieces:
                 pc.funcs = {b.function for b in pc.ref.bones}
 
@@ -1165,6 +1348,7 @@ def build(vrm_path, game, opts=None, log=print):
                     log("  thickened the neck slightly (%d vertices) so your hunter's own neck stays hidden" % moved)
 
             head_funcs = {f for f in (fit.bone_function.get(b) for b in HEAD_BONES) if f is not None}
+            head_funcs |= face_funcs
             if helm is not None:
                 head_funcs |= {f for c in helm.chains for f in c["funcs"]}
             candidates = [(m, pc.mrl) for pc in pieces for m in pc.mrl.materials]

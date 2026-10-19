@@ -505,3 +505,49 @@ def test_second_armor_set_also_becomes_the_avatar(tmp_path):
     # A missing second set is skipped, not an error.
     build(str(tmp_path / "a.vrm"), files, Options(armor=ARMOR, second_armor="pl999_0000", genders=("f",)),
           log=lambda m: None)
+
+
+def test_face_follows_the_hunter_faces_own_bones():
+    from types import SimpleNamespace
+    from vroidhunter.build import _face_rig, _transfer_face_weights
+    bones = hunter_bones()
+    face_bones = dict(bones)
+    face_bones[300] = (4, (0, -9, 160))      # e.g. an eyelid bone in front of the head
+    face_ref = M.read_mod3(make_hunter_mod3(face_bones, ("Ch_Pl_Face_Mt",), weight_func=300,
+                                            box=((-6, 6), (-11, -7), (150, 166))))
+    # Our skeleton: the hunter's, with the head moved up (kept avatar proportions).
+    moved = {f: (p, tuple(np.add(pos, (0, 0, 4)) if f in (3, 4) else pos)) for f, (p, pos) in bones.items()}
+    ours = M.read_mod3(make_hunter_mod3(moved))
+    rig, carry = _face_rig(face_ref, ours, taken=set())
+    assert [(f, p) for f, p, _ in rig] == [(300, 4)]
+    assert np.allclose(rig[0][2][:3, 3], (0, -9, 164))   # carried along with the head
+    ext = M.extend_skeleton(ours, rig)
+    assert 300 in ext.function_to_index()
+
+    rng = np.random.default_rng(1)
+    face_pts = rng.uniform((-5, -10, 156), (5, -8, 168), (200, 3))
+    hair_pts = face_pts + (0, 0, 2)
+    model = SimpleNamespace(primitives=[SimpleNamespace(material=0), SimpleNamespace(material=1)],
+                            materials=[SimpleNamespace(name="N00_000_00_Face_00_SKIN"),
+                                       SimpleNamespace(name="N00_000_Hair_00_HAIR")])
+    funcs = [np.tile([4, 0, 0, 0], (200, 1)), np.tile([4, 0, 0, 0], (200, 1))]
+    weights = [np.tile([1.0, 0, 0, 0], (200, 1)), np.tile([1.0, 0, 0, 0], (200, 1))]
+    fit = SimpleNamespace(positions=[face_pts, hair_pts], functions=funcs, weights=weights)
+    changed = _transfer_face_weights(model, fit, face_ref, carry, {300})
+    assert changed > 150
+    assert (funcs[0][:, 0] == 300).mean() > 0.75
+    assert np.allclose(weights[0].sum(axis=1), 1.0)
+    assert (funcs[1][:, 0] == 4).all()        # hair is left alone
+
+
+def test_helmet_gets_the_face_bones(tmp_path):
+    data, _ = make_vrm(0)
+    (tmp_path / "a.vrm").write_bytes(data)
+    make_game_folder(str(tmp_path / "g"), genders=("f",))
+    files = FolderFiles(str(tmp_path / "g"))
+    helm = "pl\\f_equip\\pl001_0000\\helm\\mod\\f_helm001.mod3"
+    on = build(str(tmp_path / "a.vrm"), files, Options(armor=ARMOR, genders=("f",)), log=lambda m: None)
+    off = build(str(tmp_path / "a.vrm"), files, Options(armor=ARMOR, genders=("f",), expressions=False),
+                log=lambda m: None)
+    assert 300 in {b.function for b in M.read_mod3(on.files[helm]).bones}
+    assert 300 not in {b.function for b in M.read_mod3(off.files[helm]).bones}

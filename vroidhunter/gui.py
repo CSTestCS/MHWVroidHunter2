@@ -10,6 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from . import __version__
 from . import game as G
+from . import settings as S
 from . import oodle as O
 from .build import DEFAULT_ARMOR, DEFAULT_SECOND_ARMOR, FULL_HELMET, KNOWN_ARMOR, Options, build, scan_armor
 from .chunk import GameFiles
@@ -88,9 +89,13 @@ class App:
         self.both = tk.BooleanVar(value=True)
         ttk.Checkbutton(frm, text="Make it work for both female and male hunters",
                         variable=self.both).grid(row=11, column=1, sticky="w", **pad)
+        self.expressions = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frm, text="Facial expressions (the avatar's face follows your hunter's blinking, "
+                                  "talking and expressions)",
+                        variable=self.expressions).grid(row=12, column=1, sticky="w", **pad)
 
         bf = ttk.Frame(frm)
-        bf.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(10, 4))
+        bf.grid(row=13, column=0, columnspan=3, sticky="ew", pady=(10, 4))
         ttk.Button(bf, text="Install", command=self.do_install).pack(side="left", padx=4)
         ttk.Button(bf, text="Uninstall", command=self.do_uninstall).pack(side="left", padx=4)
         ttk.Button(bf, text="Export to folder...", command=self.do_export).pack(side="left", padx=4)
@@ -98,13 +103,47 @@ class App:
         self.progress.pack(side="right", padx=4)
 
         self.log_box = tk.Text(frm, height=12, wrap="word", state="disabled")
-        self.log_box.grid(row=13, column=0, columnspan=3, sticky="nsew", **pad)
-        frm.rowconfigure(13, weight=1)
+        self.log_box.grid(row=14, column=0, columnspan=3, sticky="nsew", **pad)
+        frm.rowconfigure(14, weight=1)
 
+        self.restore_settings(vrm_path)
         self.check_loader()
         root.after(100, self.pump)
         if G.is_game_dir(self.game.get()):
             root.after(300, self.scan)
+
+    # ---- remembered settings ------------------------------------------------
+    def restore_settings(self, vrm_path=""):
+        saved = S.load()
+        if not saved:
+            return
+        if not vrm_path and isinstance(saved.get("vrm"), str) and os.path.isfile(saved["vrm"]):
+            self.vrm.set(saved["vrm"])
+        if isinstance(saved.get("game"), str) and G.is_game_dir(saved["game"]):
+            self.game.set(saved["game"])
+        if isinstance(saved.get("armor"), str) and saved["armor"]:
+            self.armor.set(self._label(saved["armor"]))
+        if isinstance(saved.get("second_armor"), str):
+            self.armor2.set(self._label(saved["second_armor"]) if saved["second_armor"] else NO_SECOND)
+        if isinstance(saved.get("height"), (int, float)):
+            self.height.set(int(max(50, min(150, saved["height"]))))
+        for key, var in (("physics", self.physics), ("keep_proportions", self.keep), ("cover_neck", self.neck),
+                         ("both_genders", self.both), ("expressions", self.expressions)):
+            if isinstance(saved.get(key), bool):
+                var.set(saved[key])
+        if isinstance(saved.get("oodle"), str) and os.path.isfile(saved["oodle"]):
+            self.oodle_path = saved["oodle"]
+
+    def save_settings(self):
+        try:
+            height = int(self.height.get())
+        except (tk.TclError, ValueError):
+            height = 100
+        S.save({"vrm": self.vrm.get(), "game": self.game.get(), "armor": self.selected_armor(),
+                "second_armor": self.selected_second_armor(), "height": height,
+                "physics": self.physics.get(), "keep_proportions": self.keep.get(),
+                "cover_neck": self.neck.get(), "both_genders": self.both.get(),
+                "expressions": self.expressions.get(), "oodle": self.oodle_path or ""})
 
     # ---- helpers ----------------------------------------------------------
     def _label(self, armor_id):
@@ -217,7 +256,7 @@ class App:
         if second:
             self.armor2.set(self._label(second))
         current = self.selected_armor()
-        if self.coverage.get(current, 0) is None or self.coverage.get(current, 0) < FULL_HELMET:
+        if current not in self.coverage:   # keep the user's (or remembered) choice when it exists
             preferred = [a for a in full if a in KNOWN_ARMOR] or full
             if preferred:
                 current = preferred[0]
@@ -258,7 +297,7 @@ class App:
                        genders=("f", "m") if self.both.get() else ("f",),
                        physics=self.physics.get(),
                        keep_proportions=self.keep.get(),
-                       cover_neck=self.neck.get(),
+                       cover_neck=self.neck.get(), expressions=self.expressions.get(),
                        height_scale=max(0.5, min(1.5, self.height.get() / 100.0)))
 
     def _files(self, log):
@@ -290,6 +329,7 @@ class App:
     def do_install(self):
         if not self._validate():
             return
+        self.save_settings()
         gd = self.game.get()
         armor = self.selected_armor()
         second = self.selected_second_armor()
@@ -318,6 +358,7 @@ class App:
         out = filedialog.askdirectory(title="Export the mod into this folder")
         if not out:
             return
+        self.save_settings()
 
         def work(log):
             result = self._build(log)
@@ -329,5 +370,11 @@ class App:
 
 def main(vrm_path=""):
     root = tk.Tk()
-    App(root, vrm_path)
+    app = App(root, vrm_path)
+
+    def on_close():
+        app.save_settings()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()

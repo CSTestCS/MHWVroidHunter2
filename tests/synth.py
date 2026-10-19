@@ -447,7 +447,9 @@ def make_game_folder(root, armor="pl001_0000", genders=("f", "m"), flip_winding=
         os.makedirs(face, exist_ok=True)
         with open(os.path.join(face, "face000.mod3"), "wb") as f:
             # The hunter's own neck: a box around the neck bone, thicker than the avatar's neck.
-            f.write(make_hunter_mod3(bones, ("Ch_Pl_Face_Mt",), weight_func=3,
+            face_bones = dict(bones)
+            face_bones[300] = (4, tuple(np.add(bones[4][1], (0, -9, 4))))   # a face (e.g. eyelid) bone
+            f.write(make_hunter_mod3(face_bones, ("Ch_Pl_Face_Mt",), weight_func=3,
                                      box=((-5, 5), (-5, 5), (np.array(bones[3][1])[2] - 6, np.array(bones[3][1])[2] + 6))))
     hair = os.path.join(root, "pl", "hair", "hair000", "mod")
     os.makedirs(hair, exist_ok=True)

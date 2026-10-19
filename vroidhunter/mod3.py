@@ -520,8 +520,9 @@ def _colmajor(m):
 def extend_skeleton(ref, new_bones):
     """Copy of `ref` with extra bones appended.
 
-    new_bones: list of (function, parent_function, world_position). Parents must be
-    existing bones or bones earlier in the list. New bones get identity orientation.
+    new_bones: list of (function, parent_function, world_position or 4x4 world matrix).
+    Parents must be existing bones or bones earlier in the list. Bones given a position
+    get identity orientation.
     """
     import dataclasses
     if not new_bones:
@@ -537,8 +538,12 @@ def extend_skeleton(ref, new_bones):
         if not 0 <= func < REMAP_SIZE:
             raise ValueError("bone function %d out of range" % func)
         p = index[parent_func]
-        world = np.eye(4)
-        world[:3, 3] = pos
+        pos = np.asarray(pos, dtype=np.float64)
+        if pos.shape == (4, 4):
+            world = pos.copy()
+        else:
+            world = np.eye(4)
+            world[:3, 3] = pos
         local = np.linalg.inv(worlds[p]) @ world
         t = local[:3, 3]
         bones.append(Bone(func, p, 255, bones[p].unkn2, float(np.linalg.norm(t)), tuple(map(float, t))))

@@ -35,7 +35,7 @@ PC sees the change.
 7. In game, wear that set (or its layered armor) on all five slots and keep
    *Show headgear* on.
 
-To use a different avatar, run it again and press **Install**. **Uninstall**
+Your choices are remembered for next time. To use a different avatar, run it again and press **Install**. **Uninstall**
 removes everything it added. **Export to folder…** writes a `nativePC` folder for mod managers.
 
 ### The one extra file (oo2core_8_win64.dll)
@@ -75,6 +75,10 @@ checked against known checksums. You can also pick the file yourself.
   default, and colours are toned to the brightness range the game's lighting
   expects. (The game's own skin material isn't used: the game paints your
   hunter's skin texture over it.)
+* **Facial expressions.** The game animates your hunter's face with bones (blinking,
+  talking, expressions). VRoid Hunter copies those face bones from your hunter's own
+  face model into the helmet and matches the hunter's face onto the avatar's, so the
+  avatar's eyelids, brows and mouth follow the same animations.
 * **Splits the avatar like real armor.** The head and hair go in the helmet
   model, the rest in the body model. Armor pieces the avatar doesn't need (arms,
   waist, legs) are made invisible so they don't poke through.
@@ -84,7 +88,10 @@ checked against known checksums. You can also pick the file yourself.
 * **Not tested in the game yet.** The file formats come from community research
   and the converter is tested on synthetic data and sample VRMs. Physics may need
   tuning. If something looks wrong, open an issue with a screenshot.
-* **No facial expressions.** The avatar keeps its default face.
+* **Facial expressions are experimental.** They depend on the game animating the face
+  bones copied into the helmet, which hasn't been checked in game yet. If the face
+  stays still, nothing else is affected. VRM blend shapes (VRoid's own expressions)
+  can't be used, because MHW models have no blend shapes.
 * **Partly transparent parts.** Fully see-through triangles are removed (eyelashes,
   eye highlights, hair tips), but soft semi-transparent edges render solid.
 * **Physics bone limit.** The game allows about 90 extra physics bones per
@@ -107,7 +114,7 @@ checked against known checksums. You can also pick the file yourself.
 ## Command line
 
 ```
-VRoidHunter install  avatar.vrm [--game DIR] [--armor pl123_0000] [--second-armor pl067_0000|none] [--no-physics] [--no-neck-cover] [--hunter-proportions] [--height 1.0] [--female-only]
+VRoidHunter install  avatar.vrm [--game DIR] [--armor pl123_0000] [--second-armor pl067_0000|none] [--no-physics] [--no-neck-cover] [--no-expressions] [--hunter-proportions] [--height 1.0] [--female-only]
                      [--oodle PATH | --download-oodle]
 VRoidHunter export   avatar.vrm OUTDIR [same options]
 VRoidHunter uninstall [--game DIR]
