@@ -692,6 +692,7 @@ def _face_model(game, gender):
 # Facial expressions: copy the hunter face's own rig onto the avatar's head
 # ---------------------------------------------------------------------------
 
+MAX_FACE_POINTS = 6000
 FACE_WORDS = ("FACE", "EYE", "BROW", "LASH", "MOUTH", "TOOTH", "TEETH")
 
 
@@ -784,6 +785,10 @@ def _transfer_face_weights(model, fit, face_ref, carry, face_funcs, head_func=4,
     if not hp:
         return 0
     hp = np.vstack(hp)
+    # Plenty for matching, and keeps the search fast on detailed faces (all LODs included).
+    if len(hp) > MAX_FACE_POINTS:
+        keep = np.linspace(0, len(hp) - 1, MAX_FACE_POINTS).astype(np.int64)
+        hp, hw = hp[keep], [hw[i] for i in keep]
     # Avatar face vertices: face materials, held by the head.
     targets = []
     for pi, prim in enumerate(model.primitives):
@@ -808,17 +813,18 @@ def _transfer_face_weights(model, fit, face_ref, carry, face_funcs, head_func=4,
     np.fill_diagonal(d2s, np.inf)
     spacing = float(np.median(np.sqrt(d2s.min(axis=1)))) if len(sample) > 1 else 0.0
     reach = max(0.15 * float(np.linalg.norm(hi_h - lo_h)), 3.0 * spacing)
+    hp_sq = (hp ** 2).sum(axis=1)
     changed, row = 0, 0
     for pi, sel in targets:
         funcs, wts = fit.functions[pi], fit.weights[pi]
         pts = mapped[row:row + len(sel)]
         row += len(sel)
-        for start in range(0, len(sel), 512):
-            chunk = pts[start:start + 512]
-            d2 = ((chunk[:, None, :] - hp[None, :, :]) ** 2).sum(axis=2)
+        for start in range(0, len(sel), 256):
+            chunk = pts[start:start + 256]
+            d2 = np.maximum((chunk ** 2).sum(axis=1)[:, None] + hp_sq[None, :] - 2.0 * chunk @ hp.T, 0.0)
             kk = min(k, len(hp))
             near = np.argpartition(d2, kk - 1, axis=1)[:, :kk]
-            for r, v in enumerate(sel[start:start + 512]):
+            for r, v in enumerate(sel[start:start + 256]):
                 dist = np.sqrt(d2[r, near[r]])
                 if dist.min() > reach:
                     continue
