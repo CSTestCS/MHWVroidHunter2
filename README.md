@@ -29,8 +29,10 @@ PC sees the change.
 4. Choose the armor set. VRoid Hunter checks every set in your game and marks
    the ones with a **full helmet**; those hide your hunter's own face under
    the avatar's head. Pick one you own as armor or layered armor.
-5. Press **Install** (10–60 seconds).
-6. In game, wear that set (or its layered armor) on all five slots and keep
+5. Optionally choose a **second armor** set that also becomes your avatar
+   (default pl067_0000; pick *None* to change only one set).
+6. Press **Install** (10–60 seconds).
+7. In game, wear that set (or its layered armor) on all five slots and keep
    *Show headgear* on.
 
 To use a different avatar, run it again and press **Install**. **Uninstall**
@@ -105,7 +107,7 @@ checked against known checksums. You can also pick the file yourself.
 ## Command line
 
 ```
-VRoidHunter install  avatar.vrm [--game DIR] [--armor pl123_0000] [--no-physics] [--no-neck-cover] [--hunter-proportions] [--height 1.0] [--female-only]
+VRoidHunter install  avatar.vrm [--game DIR] [--armor pl123_0000] [--second-armor pl067_0000|none] [--no-physics] [--no-neck-cover] [--hunter-proportions] [--height 1.0] [--female-only]
                      [--oodle PATH | --download-oodle]
 VRoidHunter export   avatar.vrm OUTDIR [same options]
 VRoidHunter uninstall [--game DIR]

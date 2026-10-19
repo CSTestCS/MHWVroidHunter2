@@ -3,7 +3,7 @@
 No arguments (or just a .vrm path, e.g. by dropping the file on the .exe)
 opens the window. Subcommands give a command line:
 
-    VRoidHunter install  model.vrm [--game DIR] [--armor pl123_0000] [--no-physics] [--height 1.0]
+    VRoidHunter install  model.vrm [--game DIR] [--armor pl123_0000] [--second-armor pl067_0000|none] [--no-physics] [--height 1.0]
     VRoidHunter export   model.vrm OUTDIR [same options]
     VRoidHunter uninstall [--game DIR]
     VRoidHunter armors   [--game DIR]
@@ -16,7 +16,7 @@ import sys
 
 def _cli(argv):
     from . import game as G
-    from .build import DEFAULT_ARMOR, FULL_HELMET, Options, build, scan_armor
+    from .build import DEFAULT_ARMOR, DEFAULT_SECOND_ARMOR, FULL_HELMET, Options, build, scan_armor
     from . import oodle as O
     from .chunk import FolderFiles, GameFiles
 
@@ -30,6 +30,8 @@ def _cli(argv):
         p.add_argument("--extracted", default=None,
                        help="use a folder of already-extracted game files instead of reading chunks")
         p.add_argument("--armor", default=DEFAULT_ARMOR)
+        p.add_argument("--second-armor", default=DEFAULT_SECOND_ARMOR,
+                       help="a second armor set that also becomes the avatar ('none' to skip)")
         p.add_argument("--no-physics", action="store_true", help="don't convert spring bones to physics")
         p.add_argument("--no-neck-cover", action="store_true",
                        help="don't thicken the avatar's neck to hide the hunter's own neck")
@@ -75,7 +77,8 @@ def _cli(argv):
             print(armor + ("  full helmet" if cov is not None and cov >= FULL_HELMET else ""))
         return
 
-    opts = Options(armor=args.armor, genders=("f",) if args.female_only else ("f", "m"),
+    second = "" if args.second_armor.lower() in ("", "none") else args.second_armor
+    opts = Options(armor=args.armor, second_armor=second, genders=("f",) if args.female_only else ("f", "m"),
                    physics=not args.no_physics, keep_proportions=not args.hunter_proportions,
                    cover_neck=not args.no_neck_cover,
                    height_scale=args.height)
@@ -90,7 +93,8 @@ def _cli(argv):
     else:
         if not G.is_game_dir(game_dir):
             sys.exit("Could not find Monster Hunter: World. Pass --game.")
-        G.install(game_dir, result.files, {"vrm": os.path.basename(args.vrm), "armor": args.armor})
+        G.install(game_dir, result.files, {"vrm": os.path.basename(args.vrm), "armor": args.armor,
+                                                   "second_armor": second})
         if not G.loader_installed(game_dir):
             print("WARNING: Stracker's Loader is not installed; the game will not load nativePC mods without it.")
 

@@ -29,6 +29,7 @@ KNOWN_ARMOR = {
     "pl123_0000": "Silver Knight",
 }
 DEFAULT_ARMOR = "pl123_0000"
+DEFAULT_SECOND_ARMOR = "pl067_0000"   # a second set that also becomes the avatar ("" for none)
 PARTS = ("helm", "body", "arm", "wst", "leg")
 MAX_VERTS = 0xFFFF
 
@@ -36,6 +37,7 @@ MAX_VERTS = 0xFFFF
 @dataclass
 class Options:
     armor: str = DEFAULT_ARMOR
+    second_armor: str = DEFAULT_SECOND_ARMOR   # optional second armor set that also becomes the avatar
     genders: tuple = ("f", "m")
     height_scale: float = 1.0
     physics: bool = True
@@ -1056,219 +1058,228 @@ def build(vrm_path, game, opts=None, log=print):
     tex_cache = {}
     template = None
 
-    for gender in opts.genders:
-        label = "female" if gender == "f" else "male"
-        mods, mrls = _armor_files(game, gender, armor)
-        if not mods:
-            log("No %s armor files for %s, skipping" % (label, armor))
-            continue
-        refs = {p: M.read_mod3(game.read(p)) for p in mods}
-        pieces = []
-        for path in mods:
-            mrl_path = _find_mrl(path, mrls)
-            if refs[path].bones and mrl_path:
-                pieces.append(Piece(path, refs[path], mrl_path, R.read_mrl3(game.read(mrl_path))))
-        pieces.sort(key=lambda pc: (PIECE_ORDER.get(_part_of(pc.path), 5), -pc.ref.header["vertexCount"]))
-        if not pieces or _part_of(pieces[0].path) != "body":
-            raise ValueError("armor %s has no usable body model for %s hunters" % (armor, label))
-        body = pieces[0]
-        helm = next((pc for pc in pieces if _part_of(pc.path) == "helm"), None)
-        log("Reference: %s (%d bones, %d meshes)" % (body.path, len(body.ref.bones), len(body.ref.meshes)))
-        if helm is None:
-            log("  this set has no helmet model; the whole avatar goes in the body model")
-        elif gender == opts.genders[0]:
-            cov = helm_coverage(helm.ref, _face_points(game, gender))
-            if cov is not None and cov < FULL_HELMET:
-                log("  NOTE: this set's helmet is open-faced, so your hunter's own face may show "
-                    "through the avatar's head. A set marked 'full helmet' avoids that.")
+    armors = [armor]
+    second = (opts.second_armor or "").lower()
+    if second and second != armor:
+        armors.append(second)
+    for armor in armors:
+        template = None
+        before = len(result.files)
+        for gender in opts.genders:
+            label = "female" if gender == "f" else "male"
+            mods, mrls = _armor_files(game, gender, armor)
+            if not mods:
+                log("No %s armor files for %s, skipping" % (label, armor))
+                continue
+            refs = {p: M.read_mod3(game.read(p)) for p in mods}
+            pieces = []
+            for path in mods:
+                mrl_path = _find_mrl(path, mrls)
+                if refs[path].bones and mrl_path:
+                    pieces.append(Piece(path, refs[path], mrl_path, R.read_mrl3(game.read(mrl_path))))
+            pieces.sort(key=lambda pc: (PIECE_ORDER.get(_part_of(pc.path), 5), -pc.ref.header["vertexCount"]))
+            if not pieces or _part_of(pieces[0].path) != "body":
+                raise ValueError("armor %s has no usable body model for %s hunters" % (armor, label))
+            body = pieces[0]
+            helm = next((pc for pc in pieces if _part_of(pc.path) == "helm"), None)
+            log("Reference: %s (%d bones, %d meshes)" % (body.path, len(body.ref.bones), len(body.ref.meshes)))
+            if helm is None:
+                log("  this set has no helmet model; the whole avatar goes in the body model")
+            elif gender == opts.genders[0]:
+                cov = helm_coverage(helm.ref, _face_points(game, gender))
+                if cov is not None and cov < FULL_HELMET:
+                    log("  NOTE: this set's helmet is open-faced, so your hunter's own face may show "
+                        "through the avatar's head. A set marked 'full helmet' avoids that.")
 
-        # Physics bones: plan ids that no piece of this set already uses.
-        used = set()
-        for pc in pieces:
-            used |= {b.function for b in pc.ref.bones}
-        planned, node_funcs = [], {}
-        if opts.physics and model.springs:
-            room = 255 - max(len(pc.ref.bones) for pc in pieces)
-            planned, node_funcs = _plan_physics(model, used, room, log)
-
-        sk = _union_skeleton(pieces)
-        fit = fit_vrm(model, sk, opts.height_scale, node_funcs, opts.keep_proportions, twist_weights=False)
-        for n in fit.notes:
-            log("  " + n)
-        if opts.keep_proportions:
-            # Move the hunter's joints to the avatar's joints so its proportions are kept.
+            # Physics bones: plan ids that no piece of this set already uses.
+            used = set()
             for pc in pieces:
-                pc.ref = M.repose_skeleton(pc.ref, fit.joint_targets)
-            refs = {p: M.repose_skeleton(r, fit.joint_targets) for p, r in refs.items()}
-            log("  kept the avatar's own proportions (%d joints moved)" % len(fit.joint_targets))
-        _transfer_arm_weights(model, fit, [M.read_mod3(game.read(p)) for p in mods], sk, body.ref, log)
+                used |= {b.function for b in pc.ref.bones}
+            planned, node_funcs = [], {}
+            if opts.physics and model.springs:
+                room = 255 - max(len(pc.ref.bones) for pc in pieces)
+                planned, node_funcs = _plan_physics(model, used, room, log)
 
-        # Add the physics bones to the piece each chain hangs from (head -> helmet).
-        piece_chains = {}
-        for chain in planned:
-            root = chain.nodes[0]
-            target = helm if (helm is not None and fit.node_bone.get(root) in HEAD_BONES) else body
-            parent = model.parents[root]
-            anchor = node_funcs.get(parent) if parent in node_funcs else \
-                fit.bone_function.get(fit.node_bone.get(parent if parent >= 0 else root), 0)
-            piece_chains.setdefault(id(target), (target, []))[1].append((chain, anchor))
-        for target, chains in piece_chains.values():
-            new = []
-            have = {b.function for b in target.ref.bones}
-            for chain, anchor in chains:
-                parent = anchor if anchor in have else _nearest_present(anchor, have, sk.parent)
-                pos = [fit.node_positions[n] for n in chain.nodes]
-                for f, p in zip(chain.funcs, pos):
-                    new.append((f, parent, p))
-                    sk.parent[f] = parent
-                    parent = f
-                if len(pos) >= 2:
-                    tip = pos[-1] + (pos[-1] - pos[-2])
-                else:
-                    base = target.ref.bone_world_matrices()[target.ref.function_to_index()[new[-1][1]]][:3, 3] \
-                        if new[-1][1] in have else pos[-1]
-                    step = pos[-1] - base
-                    if np.linalg.norm(step) < 1e-6:
-                        step = np.array([0.0, 0.0, -1.0]) * fit.scale * 0.05
-                    tip = pos[-1] + step * 0.5
-                new.append((chain.end_func, parent, tip))
-                sk.parent[chain.end_func] = parent
-                pts = pos + [tip]
-                dirs = [pts[i + 1] - pts[i] for i in range(len(pts) - 1)]
-                dirs.append(dirs[-1])
-                target.chains.append({"funcs": [*chain.funcs, chain.end_func], "dirs": dirs,
-                                      "radius": max(chain.radius * fit.scale, 0.3)})
-            target.ref = M.extend_skeleton(target.ref, new)
-        for pc in pieces:
-            pc.funcs = {b.function for b in pc.ref.bones}
+            sk = _union_skeleton(pieces)
+            fit = fit_vrm(model, sk, opts.height_scale, node_funcs, opts.keep_proportions, twist_weights=False)
+            for n in fit.notes:
+                log("  " + n)
+            if opts.keep_proportions:
+                # Move the hunter's joints to the avatar's joints so its proportions are kept.
+                for pc in pieces:
+                    pc.ref = M.repose_skeleton(pc.ref, fit.joint_targets)
+                refs = {p: M.repose_skeleton(r, fit.joint_targets) for p, r in refs.items()}
+                log("  kept the avatar's own proportions (%d joints moved)" % len(fit.joint_targets))
+            _transfer_arm_weights(model, fit, [M.read_mod3(game.read(p)) for p in mods], sk, body.ref, log)
 
-        if texset is None:
-            with_ext = any(t[2].lower().endswith(".tex") for t in body.mrl.textures)
-            tex_dir = body.path.rsplit("\\", 1)[0]
-            if tex_dir.lower().endswith("\\mod"):
-                tex_dir = tex_dir[:-4] + "\\tex"
-            texset = TextureSet(tex_dir + "\\vroidhunter", with_ext)
+            # Add the physics bones to the piece each chain hangs from (head -> helmet).
+            piece_chains = {}
+            for chain in planned:
+                root = chain.nodes[0]
+                target = helm if (helm is not None and fit.node_bone.get(root) in HEAD_BONES) else body
+                parent = model.parents[root]
+                anchor = node_funcs.get(parent) if parent in node_funcs else \
+                    fit.bone_function.get(fit.node_bone.get(parent if parent >= 0 else root), 0)
+                piece_chains.setdefault(id(target), (target, []))[1].append((chain, anchor))
+            for target, chains in piece_chains.values():
+                new = []
+                have = {b.function for b in target.ref.bones}
+                for chain, anchor in chains:
+                    parent = anchor if anchor in have else _nearest_present(anchor, have, sk.parent)
+                    pos = [fit.node_positions[n] for n in chain.nodes]
+                    for f, p in zip(chain.funcs, pos):
+                        new.append((f, parent, p))
+                        sk.parent[f] = parent
+                        parent = f
+                    if len(pos) >= 2:
+                        tip = pos[-1] + (pos[-1] - pos[-2])
+                    else:
+                        base = target.ref.bone_world_matrices()[target.ref.function_to_index()[new[-1][1]]][:3, 3] \
+                            if new[-1][1] in have else pos[-1]
+                        step = pos[-1] - base
+                        if np.linalg.norm(step) < 1e-6:
+                            step = np.array([0.0, 0.0, -1.0]) * fit.scale * 0.05
+                        tip = pos[-1] + step * 0.5
+                    new.append((chain.end_func, parent, tip))
+                    sk.parent[chain.end_func] = parent
+                    pts = pos + [tip]
+                    dirs = [pts[i + 1] - pts[i] for i in range(len(pts) - 1)]
+                    dirs.append(dirs[-1])
+                    target.chains.append({"funcs": [*chain.funcs, chain.end_func], "dirs": dirs,
+                                          "radius": max(chain.radius * fit.scale, 0.3)})
+                target.ref = M.extend_skeleton(target.ref, new)
+            for pc in pieces:
+                pc.funcs = {b.function for b in pc.ref.bones}
 
-        if opts.cover_neck:
-            neck = _hunter_neck_points(game, gender, body.ref)
-            moved = _cover_neck(model, fit, neck, body.ref)
-            if moved:
-                log("  thickened the neck slightly (%d vertices) so your hunter's own neck stays hidden" % moved)
+            if texset is None:
+                with_ext = any(t[2].lower().endswith(".tex") for t in body.mrl.textures)
+                tex_dir = body.path.rsplit("\\", 1)[0]
+                if tex_dir.lower().endswith("\\mod"):
+                    tex_dir = tex_dir[:-4] + "\\tex"
+                texset = TextureSet(tex_dir + "\\vroidhunter", with_ext)
 
-        head_funcs = {f for f in (fit.bone_function.get(b) for b in HEAD_BONES) if f is not None}
-        if helm is not None:
-            head_funcs |= {f for c in helm.chains for f in c["funcs"]}
-        candidates = [(m, pc.mrl) for pc in pieces for m in pc.mrl.materials]
-        candidates += _extra_templates(game, gender, armor)
-        ref_sign = _reference_winding(body.ref)
-        culled = 0
-        for pi, prim in enumerate(model.primitives):
-            mi = prim.material
-            mat = model.materials[mi] if 0 <= mi < len(model.materials) else None
-            textures = _material_textures(model, mi, texset, opts, tex_cache)
-            faces = prim.faces
-            if opts.alpha_cull and textures.alpha_pixels is not None:
-                thresh = 255 * (mat.alpha_cutoff if mat.alpha_mode == "MASK" else 0.05)
-                before = len(faces)
-                faces = _cull_transparent(faces, prim.uvs, textures.alpha_pixels, max(1.0, thresh))
-                culled += before - len(faces)
-            if len(faces) == 0:
-                continue
-            pos, nrm, tan = fit.positions[pi], fit.normals[pi], fit.tangents[pi]
-            if tan is None:
-                tan = compute_tangents(pos, nrm, prim.uvs, faces)
-            funcs, wts, uvs = fit.functions[pi], fit.weights[pi], prim.uvs
-            if _winding_sign(pos, nrm, faces) * ref_sign < 0:
-                faces = faces[:, [0, 2, 1]]
+            if opts.cover_neck:
+                neck = _hunter_neck_points(game, gender, body.ref)
+                moved = _cover_neck(model, fit, neck, body.ref)
+                if moved:
+                    log("  thickened the neck slightly (%d vertices) so your hunter's own neck stays hidden" % moved)
 
-            active = wts > 0
-            owner = np.full(len(faces), -1)
-            # The head (and hair) goes in the helmet model, like the game's own helmets.
+            head_funcs = {f for f in (fit.bone_function.get(b) for b in HEAD_BONES) if f is not None}
             if helm is not None:
-                in_head = np.vectorize(lambda f: int(f) in head_funcs)(funcs) | ~active
-                head_ok = in_head.all(axis=1)[faces].all(axis=1)
-                helm_ok = (np.vectorize(lambda f: int(f) in helm.funcs)(funcs) | ~active).all(axis=1)
-                owner[head_ok & helm_ok[faces].all(axis=1)] = pieces.index(helm)
-            # Everything else: the first piece whose skeleton has all its bones (body first).
-            for k, pc in enumerate(pieces):
-                if pc is helm:
+                head_funcs |= {f for c in helm.chains for f in c["funcs"]}
+            candidates = [(m, pc.mrl) for pc in pieces for m in pc.mrl.materials]
+            candidates += _extra_templates(game, gender, armor)
+            ref_sign = _reference_winding(body.ref)
+            culled = 0
+            for pi, prim in enumerate(model.primitives):
+                mi = prim.material
+                mat = model.materials[mi] if 0 <= mi < len(model.materials) else None
+                textures = _material_textures(model, mi, texset, opts, tex_cache)
+                faces = prim.faces
+                if opts.alpha_cull and textures.alpha_pixels is not None:
+                    thresh = 255 * (mat.alpha_cutoff if mat.alpha_mode == "MASK" else 0.05)
+                    before = len(faces)
+                    faces = _cull_transparent(faces, prim.uvs, textures.alpha_pixels, max(1.0, thresh))
+                    culled += before - len(faces)
+                if len(faces) == 0:
                     continue
-                has = np.vectorize(lambda f: int(f) in pc.funcs)(funcs) | ~active
-                face_ok = has.all(axis=1)[faces].all(axis=1) & (owner < 0)
-                owner[face_ok] = k
-            owner[owner < 0] = 0
+                pos, nrm, tan = fit.positions[pi], fit.normals[pi], fit.tangents[pi]
+                if tan is None:
+                    tan = compute_tangents(pos, nrm, prim.uvs, faces)
+                funcs, wts, uvs = fit.functions[pi], fit.weights[pi], prim.uvs
+                if _winding_sign(pos, nrm, faces) * ref_sign < 0:
+                    faces = faces[:, [0, 2, 1]]
 
-            for k in np.unique(owner):
-                pc = pieces[k]
-                sub = faces[owner == k]
-                used_v = np.unique(sub)
-                remap = -np.ones(len(pos), dtype=np.int64)
-                remap[used_v] = np.arange(len(used_v))
-                f2i = pc.ref.function_to_index()
-                ids = np.vectorize(lambda f: f2i[_nearest_present(int(f), f2i, sk.parent)])(funcs[used_v])
-                p_, n_, t_, u_, w_ = pos[used_v], nrm[used_v], tan[used_v], uvs[used_v], wts[used_v]
-                sub = remap[sub]
-                if opts.double_sided and mat is not None and mat.double_sided:
-                    n = len(p_)
-                    back_t = t_.copy()
-                    back_t[:, 3] *= -1
-                    p_, n_, t_ = np.vstack([p_, p_]), np.vstack([n_, -n_]), np.vstack([t_, back_t])
-                    u_, ids, w_ = np.vstack([u_, u_]), np.vstack([ids, ids]), np.vstack([w_, w_])
-                    sub = np.vstack([sub, sub[:, [0, 2, 1]] + n])
-                if mi not in pc.mat_lookup:
-                    pc.mat_lookup[mi] = len(pc.mat_names)
-                    pc.mat_names.append("VRH_%02d_%s" % (len(pc.mat_names), _sanitize(mat.name if mat else "default")))
-                for piece in _split(p_, n_, t_, u_, ids, w_, sub):
-                    pp, nn, tt, uu, ii, ww, ff = piece
-                    pc.parts.append(M.MeshPart(pc.mat_lookup[mi], pp, nn, tt, uu, ii, ww, ff))
-        if culled:
-            log("  removed %d fully transparent triangles" % culled)
-        if not any(pc.parts for pc in pieces):
-            raise ValueError("nothing left to draw after processing the VRM")
+                active = wts > 0
+                owner = np.full(len(faces), -1)
+                # The head (and hair) goes in the helmet model, like the game's own helmets.
+                if helm is not None:
+                    in_head = np.vectorize(lambda f: int(f) in head_funcs)(funcs) | ~active
+                    head_ok = in_head.all(axis=1)[faces].all(axis=1)
+                    helm_ok = (np.vectorize(lambda f: int(f) in helm.funcs)(funcs) | ~active).all(axis=1)
+                    owner[head_ok & helm_ok[faces].all(axis=1)] = pieces.index(helm)
+                # Everything else: the first piece whose skeleton has all its bones (body first).
+                for k, pc in enumerate(pieces):
+                    if pc is helm:
+                        continue
+                    has = np.vectorize(lambda f: int(f) in pc.funcs)(funcs) | ~active
+                    face_ok = has.all(axis=1)[faces].all(axis=1) & (owner < 0)
+                    owner[face_ok] = k
+                owner[owner < 0] = 0
 
-        for pc in pieces:
-            if not pc.parts:
-                continue
-            name_hash = _hash_function(pc.ref, pc.mrl)
-            _, _, header = _template_material(pc, name_hash)
-            blocktype = M.BLOCK_SKIN4_1UV
-            if header and M.BLOCK_TYPES[header["blocktype"]]["weights"] == 8:
-                blocktype = M.BLOCK_SKIN8_1UV
-            result.files[pc.mrl_path] = _write_materials(pc, model, texset, opts, tex_cache, name_hash,
-                                                         candidates)
-            result.files[pc.path] = M.write_mod3(pc.ref, pc.parts, pc.mat_names, blocktype, header)
-            log("  %s: %d mesh parts, %d vertices" % (pc.path.rsplit("\\", 1)[-1], len(pc.parts),
-                                                     sum(len(p.positions) for p in pc.parts)))
-            if pc.chains:
-                if template is None:
-                    template, source = _ctc_template(game, mods)
-                    log("  physics tuning copied from %s" % (source or "built-in defaults"))
-                stem = pc.path.rsplit(".", 1)[0]
-                # Our own colliders replace the armor's: its capsules fit the armor, not the avatar.
-                capsules = _capsules(model, fit, pc.ref, log if pc is body else (lambda m: None))
-                ccl_src = _sibling(game, pc.path, ".ccl") or _sibling(game, body.path, ".ccl")
-                unknowns = CL.template_unknowns(game.read(ccl_src)) if ccl_src else ((0,) * 8, (0,) * 4)
-                ctc_path = _sibling(game, pc.path, ".ctc") or stem + ".ctc"
-                ccl_path = _sibling(game, pc.path, ".ccl") or stem + ".ccl"
-                result.files[ctc_path] = C.write_ctc(template, pc.chains, collide=bool(capsules))
-                result.files[ccl_path] = CL.write_ccl(capsules, unknowns)
-                log("  %s: %d physics chains, %d collision capsules" % (
-                    ctc_path.rsplit("\\", 1)[-1], len(pc.chains), len(capsules)))
+                for k in np.unique(owner):
+                    pc = pieces[k]
+                    sub = faces[owner == k]
+                    used_v = np.unique(sub)
+                    remap = -np.ones(len(pos), dtype=np.int64)
+                    remap[used_v] = np.arange(len(used_v))
+                    f2i = pc.ref.function_to_index()
+                    ids = np.vectorize(lambda f: f2i[_nearest_present(int(f), f2i, sk.parent)])(funcs[used_v])
+                    p_, n_, t_, u_, w_ = pos[used_v], nrm[used_v], tan[used_v], uvs[used_v], wts[used_v]
+                    sub = remap[sub]
+                    if opts.double_sided and mat is not None and mat.double_sided:
+                        n = len(p_)
+                        back_t = t_.copy()
+                        back_t[:, 3] *= -1
+                        p_, n_, t_ = np.vstack([p_, p_]), np.vstack([n_, -n_]), np.vstack([t_, back_t])
+                        u_, ids, w_ = np.vstack([u_, u_]), np.vstack([ids, ids]), np.vstack([w_, w_])
+                        sub = np.vstack([sub, sub[:, [0, 2, 1]] + n])
+                    if mi not in pc.mat_lookup:
+                        pc.mat_lookup[mi] = len(pc.mat_names)
+                        pc.mat_names.append("VRH_%02d_%s" % (len(pc.mat_names), _sanitize(mat.name if mat else "default")))
+                    for piece in _split(p_, n_, t_, u_, ids, w_, sub):
+                        pp, nn, tt, uu, ii, ww, ff = piece
+                        pc.parts.append(M.MeshPart(pc.mat_lookup[mi], pp, nn, tt, uu, ii, ww, ff))
+            if culled:
+                log("  removed %d fully transparent triangles" % culled)
+            if not any(pc.parts for pc in pieces):
+                raise ValueError("nothing left to draw after processing the VRM")
 
-        # Armor pieces the avatar doesn't use draw nothing, so they don't poke through.
-        hidden = 0
-        for path in mods:
-            if path in result.files:
-                continue
-            blank = _blank(refs[path])
-            if blank is not None:
-                result.files[path] = blank
-                hidden += 1
-        if hidden:
-            log("  %d unused %s armor pieces made invisible" % (hidden, label))
+            for pc in pieces:
+                if not pc.parts:
+                    continue
+                name_hash = _hash_function(pc.ref, pc.mrl)
+                _, _, header = _template_material(pc, name_hash)
+                blocktype = M.BLOCK_SKIN4_1UV
+                if header and M.BLOCK_TYPES[header["blocktype"]]["weights"] == 8:
+                    blocktype = M.BLOCK_SKIN8_1UV
+                result.files[pc.mrl_path] = _write_materials(pc, model, texset, opts, tex_cache, name_hash,
+                                                             candidates)
+                result.files[pc.path] = M.write_mod3(pc.ref, pc.parts, pc.mat_names, blocktype, header)
+                log("  %s: %d mesh parts, %d vertices" % (pc.path.rsplit("\\", 1)[-1], len(pc.parts),
+                                                         sum(len(p.positions) for p in pc.parts)))
+                if pc.chains:
+                    if template is None:
+                        template, source = _ctc_template(game, mods)
+                        log("  physics tuning copied from %s" % (source or "built-in defaults"))
+                    stem = pc.path.rsplit(".", 1)[0]
+                    # Our own colliders replace the armor's: its capsules fit the armor, not the avatar.
+                    capsules = _capsules(model, fit, pc.ref, log if pc is body else (lambda m: None))
+                    ccl_src = _sibling(game, pc.path, ".ccl") or _sibling(game, body.path, ".ccl")
+                    unknowns = CL.template_unknowns(game.read(ccl_src)) if ccl_src else ((0,) * 8, (0,) * 4)
+                    ctc_path = _sibling(game, pc.path, ".ctc") or stem + ".ctc"
+                    ccl_path = _sibling(game, pc.path, ".ccl") or stem + ".ccl"
+                    result.files[ctc_path] = C.write_ctc(template, pc.chains, collide=bool(capsules))
+                    result.files[ccl_path] = CL.write_ccl(capsules, unknowns)
+                    log("  %s: %d physics chains, %d collision capsules" % (
+                        ctc_path.rsplit("\\", 1)[-1], len(pc.chains), len(capsules)))
 
-    if not result.files:
-        raise ValueError("armor %s was not found in the game files" % armor)
+            # Armor pieces the avatar doesn't use draw nothing, so they don't poke through.
+            hidden = 0
+            for path in mods:
+                if path in result.files:
+                    continue
+                blank = _blank(refs[path])
+                if blank is not None:
+                    result.files[path] = blank
+                    hidden += 1
+            if hidden:
+                log("  %d unused %s armor pieces made invisible" % (hidden, label))
+
+        if len(result.files) == before:
+            if armor == armors[0]:
+                raise ValueError("armor %s was not found in the game files" % armor)
+            log("Second armor set %s was not found in the game files, skipping" % armor)
     if texset:
         result.files.update(texset.files)
     result.notes.append("%d files generated" % len(result.files))

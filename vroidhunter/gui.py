@@ -11,10 +11,11 @@ from tkinter import filedialog, messagebox, ttk
 from . import __version__
 from . import game as G
 from . import oodle as O
-from .build import DEFAULT_ARMOR, FULL_HELMET, KNOWN_ARMOR, Options, build, scan_armor
+from .build import DEFAULT_ARMOR, DEFAULT_SECOND_ARMOR, FULL_HELMET, KNOWN_ARMOR, Options, build, scan_armor
 from .chunk import GameFiles
 
 LOADER_URL = "https://www.nexusmods.com/monsterhunterworld/mods/1982"
+NO_SECOND = "None"
 INTRO = ("In Monster Hunter: World your hunter's look comes from the armor they wear. "
          "VRoid Hunter turns one armor set into your VRoid model: wear that set (or its layered "
          "armor) on all five slots and your hunter becomes your avatar, physics included. "
@@ -59,28 +60,37 @@ class App:
                             "hide your hunter's own face under the avatar's head.",
                   wraplength=520, foreground="#555").grid(row=4, column=1, columnspan=2, sticky="w", padx=8)
 
-        ttk.Label(frm, text="Height").grid(row=5, column=0, sticky="w", **pad)
+        ttk.Label(frm, text="Second armor").grid(row=5, column=0, sticky="w", **pad)
+        self.armor2 = tk.StringVar(value=self._label(DEFAULT_SECOND_ARMOR))
+        self.armor2_box = ttk.Combobox(frm, textvariable=self.armor2,
+                                       values=[NO_SECOND] + [self._label(a) for a in self.armor_ids])
+        self.armor2_box.grid(row=5, column=1, sticky="ew", **pad)
+        ttk.Label(frm, text="Optional: a second set that also becomes your avatar, e.g. for a different "
+                            "layered look. Choose 'None' to only change the set above.",
+                  wraplength=520, foreground="#555").grid(row=6, column=1, columnspan=2, sticky="w", padx=8)
+
+        ttk.Label(frm, text="Height").grid(row=7, column=0, sticky="w", **pad)
         hf = ttk.Frame(frm)
-        hf.grid(row=5, column=1, sticky="w", **pad)
+        hf.grid(row=7, column=1, sticky="w", **pad)
         self.height = tk.IntVar(value=100)
         ttk.Spinbox(hf, from_=50, to=150, increment=1, textvariable=self.height, width=6).pack(side="left")
         ttk.Label(hf, text="% of your hunter's height (100 = same height)").pack(side="left", padx=6)
 
         self.physics = tk.BooleanVar(value=True)
         ttk.Checkbutton(frm, text="Physics for hair, skirts and accessories (from the VRM's spring bones)",
-                        variable=self.physics).grid(row=6, column=1, sticky="w", **pad)
+                        variable=self.physics).grid(row=8, column=1, sticky="w", **pad)
         self.keep = tk.BooleanVar(value=True)
         ttk.Checkbutton(frm, text="Keep the VRoid model's own proportions (untick to stretch it to the hunter's build)",
-                        variable=self.keep).grid(row=7, column=1, sticky="w", **pad)
+                        variable=self.keep).grid(row=9, column=1, sticky="w", **pad)
         self.neck = tk.BooleanVar(value=True)
         ttk.Checkbutton(frm, text="Thicken the neck slightly if your hunter's own neck would show through",
-                        variable=self.neck).grid(row=8, column=1, sticky="w", **pad)
+                        variable=self.neck).grid(row=10, column=1, sticky="w", **pad)
         self.both = tk.BooleanVar(value=True)
         ttk.Checkbutton(frm, text="Make it work for both female and male hunters",
-                        variable=self.both).grid(row=9, column=1, sticky="w", **pad)
+                        variable=self.both).grid(row=11, column=1, sticky="w", **pad)
 
         bf = ttk.Frame(frm)
-        bf.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(10, 4))
+        bf.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(10, 4))
         ttk.Button(bf, text="Install", command=self.do_install).pack(side="left", padx=4)
         ttk.Button(bf, text="Uninstall", command=self.do_uninstall).pack(side="left", padx=4)
         ttk.Button(bf, text="Export to folder...", command=self.do_export).pack(side="left", padx=4)
@@ -88,8 +98,8 @@ class App:
         self.progress.pack(side="right", padx=4)
 
         self.log_box = tk.Text(frm, height=12, wrap="word", state="disabled")
-        self.log_box.grid(row=11, column=0, columnspan=3, sticky="nsew", **pad)
-        frm.rowconfigure(11, weight=1)
+        self.log_box.grid(row=13, column=0, columnspan=3, sticky="nsew", **pad)
+        frm.rowconfigure(13, weight=1)
 
         self.check_loader()
         root.after(100, self.pump)
@@ -105,6 +115,12 @@ class App:
         if cov is not None and cov >= FULL_HELMET:
             parts.append("- full helmet")
         return "  ".join(parts)
+
+    def selected_second_armor(self):
+        text = self.armor2.get().strip()
+        if not text or text == NO_SECOND:
+            return ""
+        return text.split()[0].lower()
 
     def selected_armor(self):
         text = self.armor.get().strip()
@@ -196,6 +212,10 @@ class App:
         rest = [a for a, c in results if a not in full]
         self.armor_ids = full + rest
         self.armor_box.configure(values=[self._label(a) for a in self.armor_ids])
+        self.armor2_box.configure(values=[NO_SECOND] + [self._label(a) for a in self.armor_ids])
+        second = self.selected_second_armor()
+        if second:
+            self.armor2.set(self._label(second))
         current = self.selected_armor()
         if self.coverage.get(current, 0) is None or self.coverage.get(current, 0) < FULL_HELMET:
             preferred = [a for a in full if a in KNOWN_ARMOR] or full
@@ -234,7 +254,7 @@ class App:
         return True
 
     def _options(self):
-        return Options(armor=self.selected_armor(),
+        return Options(armor=self.selected_armor(), second_armor=self.selected_second_armor(),
                        genders=("f", "m") if self.both.get() else ("f",),
                        physics=self.physics.get(),
                        keep_proportions=self.keep.get(),
@@ -272,14 +292,17 @@ class App:
             return
         gd = self.game.get()
         armor = self.selected_armor()
+        second = self.selected_second_armor()
+        sets = self._label(armor) + ("" if not second or second == armor else " or " + self._label(second))
 
         def work(log):
             result = self._build(log)
-            G.install(gd, result.files, {"vrm": os.path.basename(self.vrm.get()), "armor": armor}, log)
+            G.install(gd, result.files, {"vrm": os.path.basename(self.vrm.get()), "armor": armor,
+                                         "second_armor": second}, log)
             extra = "" if G.loader_installed(gd) else \
                 "\n\nStracker's Loader isn't installed yet. Install it once, or the game won't load the mod."
             return ("Installed! In game, wear the %s set (or its layered armor) on all five slots, with "
-                    "'Show headgear' on, to see your avatar.%s" % (self._label(armor), extra))
+                    "'Show headgear' on, to see your avatar.%s" % (sets, extra))
 
         self.run(work)
 

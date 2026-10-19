@@ -486,3 +486,22 @@ def test_face_details_are_not_skin():
         assert material_kind(name) != "skin", name
     assert material_kind("N00_000_00_Face_00_SKIN") == "skin"
     assert material_kind("N00_000_00_Body_00_SKIN") == "skin"
+
+
+def test_second_armor_set_also_becomes_the_avatar(tmp_path):
+    data, _ = make_vrm(0)
+    (tmp_path / "a.vrm").write_bytes(data)
+    make_game_folder(str(tmp_path / "g"), genders=("f",))
+    make_game_folder(str(tmp_path / "g"), armor="pl067_0000", genders=("f",))
+    files = FolderFiles(str(tmp_path / "g"))
+    one = build(str(tmp_path / "a.vrm"), files, Options(armor=ARMOR, second_armor="", genders=("f",)),
+                log=lambda m: None)
+    both = build(str(tmp_path / "a.vrm"), files, Options(armor=ARMOR, second_armor="pl067_0000", genders=("f",)),
+                 log=lambda m: None)
+    assert not any("pl067_0000" in p for p in one.files)
+    for armor, num in ((ARMOR, "001"), ("pl067_0000", "067")):
+        body = M.read_mod3(both.files["pl\\f_equip\\%s\\body\\mod\\f_body%s.mod3" % (armor, num)])
+        assert body.header["vertexCount"] > 0
+    # A missing second set is skipped, not an error.
+    build(str(tmp_path / "a.vrm"), files, Options(armor=ARMOR, second_armor="pl999_0000", genders=("f",)),
+          log=lambda m: None)
