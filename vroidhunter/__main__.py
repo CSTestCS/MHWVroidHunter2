@@ -78,7 +78,23 @@ def _cli(argv):
             print("WARNING: Stracker's Loader is not installed; the game will not load nativePC mods without it.")
 
 
+def _ensure_streams():
+    """The windowed .exe has no console; send output to VRoidHunter.log instead."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    base = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
+    try:
+        log = open(os.path.join(base, "VRoidHunter.log"), "w", encoding="utf-8", buffering=1)
+    except OSError:
+        log = open(os.devnull, "w")
+    if sys.stdout is None:
+        sys.stdout = log
+    if sys.stderr is None:
+        sys.stderr = log
+
+
 def main():
+    _ensure_streams()
     argv = sys.argv[1:]
     if argv and argv[0] in ("install", "export", "uninstall", "armors", "-h", "--help"):
         _cli(argv)

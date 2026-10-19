@@ -24,6 +24,7 @@ jobs:
   windows-exe:
     needs: test
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -38,10 +39,14 @@ jobs:
           --collect-submodules vroidhunter
           run_vroidhunter.py
       - name: Smoke test the exe
+        timeout-minutes: 3
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath dist\VRoidHunter.exe -ArgumentList "--help" -PassThru -Wait
-          if ($p.ExitCode -ne 0) { exit 1 }
+          $p = Start-Process -FilePath dist\VRoidHunter.exe -ArgumentList "--help" -PassThru
+          if (-not $p.WaitForExit(60000)) { $p.Kill(); Write-Error "exe did not exit"; exit 1 }
+          if ($p.ExitCode -ne 0) { Write-Error "exit code $($p.ExitCode)"; exit 1 }
+          Get-Content dist\VRoidHunter.log
+          if (-not (Select-String -Path dist\VRoidHunter.log -Pattern "usage" -Quiet)) { exit 1 }
       - uses: actions/upload-artifact@v4
         with:
           name: VRoidHunter
