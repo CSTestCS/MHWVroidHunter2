@@ -479,3 +479,56 @@ def blank_part(ref, material_index=0):
 
 def material_hash(name):
     return jamcrc(name)
+
+
+def _colmajor(m):
+    return np.asarray(m, dtype=np.float64).T.reshape(16)
+
+
+def extend_skeleton(ref, new_bones):
+    """Copy of `ref` with extra bones appended.
+
+    new_bones: list of (function, parent_function, world_position). Parents must be
+    existing bones or bones earlier in the list. New bones get identity orientation.
+    """
+    import dataclasses
+    if not new_bones:
+        return ref
+    worlds = list(ref.bone_world_matrices())
+    bones = list(ref.bones)
+    lms = list(ref.lmatrices)
+    ams = list(ref.amatrices)
+    index = ref.function_to_index()
+    for func, parent_func, pos in new_bones:
+        if func in index:
+            raise ValueError("bone function %d already exists" % func)
+        if not 0 <= func < REMAP_SIZE:
+            raise ValueError("bone function %d out of range" % func)
+        p = index[parent_func]
+        world = np.eye(4)
+        world[:3, 3] = pos
+        local = np.linalg.inv(worlds[p]) @ world
+        t = local[:3, 3]
+        bones.append(Bone(func, p, 255, bones[p].unkn2, float(np.linalg.norm(t)), tuple(map(float, t))))
+        lms.append(local)
+        ams.append(np.linalg.inv(world))
+        worlds.append(world)
+        index[func] = len(bones) - 1
+    if len(bones) > 255:
+        raise ValueError("too many bones (%d, the limit is 255)" % len(bones))
+    raw = bytearray()
+    for b in bones:
+        raw += struct.pack(BONE_FMT, b.function, b.parent, b.child, b.unkn2, b.length, *b.position)
+    for m in lms:
+        raw += struct.pack("<16f", *_colmajor(m))
+    for m in ams:
+        raw += struct.pack("<16f", *_colmajor(m))
+    remap = bytearray(ref.remap) if ref.remap else bytearray([255] * REMAP_SIZE)
+    for i, b in enumerate(bones):
+        if b.function < REMAP_SIZE:
+            remap[b.function] = i if i < 255 else 255
+    raw += remap
+    header = dict(ref.header)
+    header["boneCount"] = len(bones)
+    return dataclasses.replace(ref, header=header, bones=bones, lmatrices=np.array(lms),
+                               amatrices=np.array(ams), remap=bytes(remap), skeleton_raw=bytes(raw))

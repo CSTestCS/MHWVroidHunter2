@@ -170,14 +170,22 @@ def _chunk_number(path):
     return int(m.group(1)) if m else -1
 
 
+class OodleMissing(FileNotFoundError):
+    """Raised when no usable oo2core_8/9_win64.dll could be found."""
+
+
 class GameFiles:
     """Union view over every chunk archive; later chunks override earlier ones."""
 
-    def __init__(self, game_dir, log=print):
+    def __init__(self, game_dir, log=print, oodle_path=None):
+        from .oodle import find_oodle
         self.game_dir = game_dir
-        dll = os.path.join(game_dir, "oo2core_8_win64.dll")
-        if not os.path.exists(dll):
-            raise FileNotFoundError("oo2core_8_win64.dll was not found in the game folder")
+        dll = oodle_path or find_oodle(game_dir, log=log)
+        if not dll:
+            raise OodleMissing(
+                "VRoid Hunter needs oo2core_8_win64.dll (the Oodle decompression library) to read "
+                "Monster Hunter: World's packed game files. The game itself only ships an older "
+                "version that can't read them.")
         self.oodle = Oodle(dll)
         chunk_dir = os.path.join(game_dir, "chunk")
         paths = []

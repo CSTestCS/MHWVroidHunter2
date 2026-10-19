@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import ctc as C
 from . import mod3 as M
 from . import mrl3 as R
 from . import tex as X
@@ -34,8 +35,8 @@ MAX_VERTS = 0xFFFF
 class Options:
     armor: str = DEFAULT_ARMOR
     genders: tuple = ("f", "m")
-    hide_face_and_hair: bool = True
     height_scale: float = 1.0
+    physics: bool = True
     max_texture: int = 2048
     double_sided: bool = True
     alpha_cull: bool = True
@@ -283,6 +284,7 @@ class Piece:
     parts: list = field(default_factory=list)
     mat_names: list = field(default_factory=list)
     mat_lookup: dict = field(default_factory=dict)
+    chains: list = field(default_factory=list)
 
 
 def _find_mrl(mod_path, mrls):
@@ -384,18 +386,225 @@ def _write_materials(piece, model, texset, opts, tex_cache, name_hash):
 PIECE_ORDER = {"body": 0, "wst": 1, "leg": 2, "arm": 3, "helm": 4, "other": 5}
 
 
+# ---------------------------------------------------------------------------
+# Physics (VRM spring bones -> MHW .ctc chains)
+# ---------------------------------------------------------------------------
+
+PHYSICS_IDS = range(150, 247)     # 247-254 are attachment points on the player skeleton
+HEAD_BONES = {"head", "leftEye", "rightEye", "jaw"}
+
+
+@dataclass
+class PlannedChain:
+    nodes: list            # kept VRM nodes, root first
+    funcs: list            # bone function per kept node
+    end_func: int
+    weight: float          # total vertex weight on the chain (for prioritising)
+
+
+def _node_weights(model):
+    w = {}
+    for prim in model.primitives:
+        for k in range(prim.joints.shape[1]):
+            for node, wt in zip(prim.joints[:, k], prim.weights[:, k]):
+                if wt > 0:
+                    w[int(node)] = w.get(int(node), 0.0) + float(wt)
+    return w
+
+
+def _plan_physics(model, used_funcs, max_new_bones, log):
+    """Choose which spring joints become MHW physics bones, within the id budget."""
+    free = [f for f in PHYSICS_IDS if f not in used_funcs]
+    budget = min(len(free), max_new_bones)
+    weights = _node_weights(model)
+    chains = []
+    for sc in model.springs:
+        wsum = sum(weights.get(n, 0.0) for n in sc.nodes)
+        if wsum > 0:
+            chains.append([list(sc.nodes), wsum])
+    if not chains or budget < 2:
+        return [], {}
+
+    def cost():
+        return sum(len(c[0]) + 1 for c in chains)
+
+    # Thin out long chains first (keep both ends), then drop the least visible chains.
+    while cost() > budget:
+        longest = max(chains, key=lambda c: len(c[0]))
+        if len(longest[0]) > 2:
+            keep = longest[0][::2]
+            if keep[-1] != longest[0][-1]:
+                keep.append(longest[0][-1])
+            longest[0] = keep if len(keep) < len(longest[0]) else longest[0][:-1]
+        else:
+            chains.remove(min(chains, key=lambda c: c[1]))
+            if not chains:
+                break
+    ids = iter(free)
+    planned, node_funcs = [], {}
+    total = sum(len(sc.nodes) for sc in model.springs)
+    for kept, wsum in chains:
+        funcs = [next(ids) for _ in kept]
+        planned.append(PlannedChain(kept, funcs, next(ids), wsum))
+        node_funcs.update(zip(kept, funcs))
+    # Joints that were thinned out follow the nearest kept joint above them.
+    for sc in model.springs:
+        last = None
+        for n in sc.nodes:
+            if n in node_funcs:
+                last = node_funcs[n]
+            elif last is not None:
+                node_funcs[n] = last
+    kept_total = sum(len(c.nodes) for c in planned)
+    log("  physics: %d chains, %d of %d spring joints simulated" % (len(planned), kept_total, total))
+    return planned, node_funcs
+
+
+def _ctc_template(game, mods):
+    """Tuning values from a real .ctc: prefer hair, then this armor set, then defaults."""
+    candidates = [p for p in game.listdir("pl\\hair\\") if p.lower().endswith(".ctc")]
+    for m in mods:
+        folder = m.rsplit("\\", 1)[0]
+        candidates += [p for p in game.listdir(folder + "\\") if p.lower().endswith(".ctc")]
+    for path in candidates[:40]:
+        try:
+            t = C.parse_template(game.read(path))
+        except Exception:
+            t = None
+        if t is not None:
+            return t, path
+    return C.default_template(), None
+
+
+def _sibling(game, mod_path, ext):
+    """Existing file with the same stem (or any file of that type) next to a model."""
+    folder, name = mod_path.rsplit("\\", 1)
+    stem = name.rsplit(".", 1)[0].lower()
+    files = [p for p in game.listdir(folder + "\\") if p.lower().endswith(ext)]
+    exact = [p for p in files if p.rsplit("\\", 1)[1].rsplit(".", 1)[0].lower() == stem]
+    return (exact or files or [None])[0]
+
+
+def _same_base_skeleton(a, b):
+    n = min(len(a.bones), len(b.bones))
+    return n > 0 and [x.function for x in a.bones[:n]] == [x.function for x in b.bones[:n]]
+
+
+# ---------------------------------------------------------------------------
+# Helmet coverage (does the helmet hide the hunter's face?)
+# ---------------------------------------------------------------------------
+
+def _model_points(ref):
+    pts = []
+    for i in range(len(ref.meshes)):
+        geo = ref.mesh_geometry(i)
+        if geo is not None:
+            pts.append(geo[0])
+    return np.vstack(pts) if pts else np.zeros((0, 3))
+
+
+def _model_triangles(ref):
+    tris = []
+    for i in range(len(ref.meshes)):
+        geo = ref.mesh_geometry(i)
+        if geo is not None and len(geo[2]):
+            tris.append(geo[0][geo[2]])
+    return np.concatenate(tris) if tris else np.zeros((0, 3, 3))
+
+
+def _ray_hits(origin, direction, tris):
+    """Does a ray hit any triangle (Moller-Trumbore, both sides)?"""
+    e1 = tris[:, 1] - tris[:, 0]
+    e2 = tris[:, 2] - tris[:, 0]
+    pvec = np.cross(direction, e2)
+    det = np.einsum("ij,ij->i", e1, pvec)
+    ok = np.abs(det) > 1e-12
+    inv = np.where(ok, 1.0 / np.where(ok, det, 1.0), 0.0)
+    tvec = origin - tris[:, 0]
+    u = np.einsum("ij,ij->i", tvec, pvec) * inv
+    qvec = np.cross(tvec, e1)
+    v = (qvec @ direction) * inv
+    t = np.einsum("ij,ij->i", e2, qvec) * inv
+    return bool(np.any(ok & (u >= 0) & (v >= 0) & (u + v <= 1) & (t > 0)))
+
+
+def _face_points(game, gender):
+    mods = [p for p in game.listdir("pl\\%s_face\\face000\\" % gender) if p.lower().endswith(".mod3")]
+    best = None
+    for p in mods:
+        try:
+            pts = _model_points(M.read_mod3(game.read(p)))
+        except Exception:
+            continue
+        if best is None or len(pts) > len(best):
+            best = pts
+    return best
+
+
+def helm_coverage(helm_ref, face_pts):
+    """Fraction of the hunter's face (front-most points) covered by the helmet mesh, 0..1."""
+    if face_pts is None or len(face_pts) == 0 or not helm_ref.bones:
+        return None
+    sk = _hunter_skeleton(helm_ref)
+    need = (4, 16, 17, 20, 21)
+    if not all(sk.has(f) for f in need):
+        return None
+    up = sk.p(4) - (sk.p(16) + sk.p(20)) / 2
+    height = np.linalg.norm(up)
+    up /= height
+    fwd = (sk.p(17) - sk.p(16) + sk.p(21) - sk.p(20)) / 2
+    fwd -= up * np.dot(fwd, up)
+    if np.linalg.norm(fwd) < 1e-6:
+        return None
+    fwd /= np.linalg.norm(fwd)
+    tris = _model_triangles(helm_ref)
+    if len(tris) == 0:
+        return 0.0
+    depth = (face_pts - sk.p(4)) @ fwd
+    front = face_pts[depth >= np.percentile(depth, 85)]
+    front = front[:: max(1, len(front) // 200)]
+    # A face point is covered if a ray going forward out of the face hits the helmet.
+    covered = sum(_ray_hits(p, fwd, tris) for p in front)
+    return covered / len(front)
+
+
+def scan_armor(game, gender="f", log=print):
+    """[(armor id, coverage or None)] for every armor set with a helmet."""
+    face = _face_points(game, gender)
+    out = []
+    sets = armor_sets(game)
+    for i, armor in enumerate(sets):
+        mods, _ = _armor_files(game, gender, armor)
+        helms = [p for p in mods if _part_of(p) == "helm"]
+        cov = None
+        if helms:
+            try:
+                ref = M.read_mod3(game.read(max(helms, key=len)))
+                cov = helm_coverage(ref, face)
+            except Exception:
+                cov = None
+        out.append((armor, cov))
+        if i % 25 == 0:
+            log("Checked %d of %d armor sets" % (i + 1, len(sets)))
+    return out
+
+
+FULL_HELMET = 0.8
+
+
 def build(vrm_path, game, opts=None, log=print):
     opts = opts or Options()
     log("Loading %s" % vrm_path)
     model = load_vrm(vrm_path)
-    log("VRM %s.0 model with %d mesh pieces and %d materials" % (
-        "1" if model.version == 1 else "0", len(model.primitives), len(model.materials)))
+    log("VRM %s.0 model: %d mesh pieces, %d materials, %d spring bone chains" % (
+        "1" if model.version == 1 else "0", len(model.primitives), len(model.materials), len(model.springs)))
     if not model.primitives:
         raise ValueError("the VRM has no meshes")
     result = BuildResult()
     armor = opts.armor.lower()
     texset = None
     tex_cache = {}
+    template = None
 
     for gender in opts.genders:
         label = "female" if gender == "f" else "male"
@@ -413,15 +622,64 @@ def build(vrm_path, game, opts=None, log=print):
         if not pieces or _part_of(pieces[0].path) != "body":
             raise ValueError("armor %s has no usable body model for %s hunters" % (armor, label))
         body = pieces[0]
-        for pc in pieces:
-            pc.funcs = {b.function for b in pc.ref.bones}
+        helm = next((pc for pc in pieces if _part_of(pc.path) == "helm"), None)
         log("Reference: %s (%d bones, %d meshes)" % (body.path, len(body.ref.bones), len(body.ref.meshes)))
+        if helm is None:
+            log("  this set has no helmet model; the whole avatar goes in the body model")
+        elif gender == opts.genders[0]:
+            cov = helm_coverage(helm.ref, _face_points(game, gender))
+            if cov is not None and cov < FULL_HELMET:
+                log("  NOTE: this set's helmet is open-faced, so your hunter's own face may show "
+                    "through the avatar's head. A set marked 'full helmet' avoids that.")
 
-        # Fit the avatar to the hunter skeleton (all pieces' bones combined).
+        # Physics bones: plan ids that no piece of this set already uses.
+        used = set()
+        for pc in pieces:
+            used |= {b.function for b in pc.ref.bones}
+        planned, node_funcs = [], {}
+        if opts.physics and model.springs:
+            room = 255 - max(len(pc.ref.bones) for pc in pieces)
+            planned, node_funcs = _plan_physics(model, used, room, log)
+
         sk = _union_skeleton(pieces)
-        fit = fit_vrm(model, sk, opts.height_scale)
+        fit = fit_vrm(model, sk, opts.height_scale, node_funcs)
         for n in fit.notes:
             log("  " + n)
+
+        # Add the physics bones to the piece each chain hangs from (head -> helmet).
+        piece_chains = {}
+        for chain in planned:
+            root = chain.nodes[0]
+            target = helm if (helm is not None and fit.node_bone.get(root) in HEAD_BONES) else body
+            parent = model.parents[root]
+            anchor = node_funcs.get(parent) if parent in node_funcs else \
+                fit.bone_function.get(fit.node_bone.get(parent if parent >= 0 else root), 0)
+            piece_chains.setdefault(id(target), (target, []))[1].append((chain, anchor))
+        for target, chains in piece_chains.values():
+            new = []
+            have = {b.function for b in target.ref.bones}
+            for chain, anchor in chains:
+                parent = anchor if anchor in have else _nearest_present(anchor, have, sk.parent)
+                pos = [fit.node_positions[n] for n in chain.nodes]
+                for f, p in zip(chain.funcs, pos):
+                    new.append((f, parent, p))
+                    sk.parent[f] = parent
+                    parent = f
+                if len(pos) >= 2:
+                    tip = pos[-1] + (pos[-1] - pos[-2])
+                else:
+                    base = target.ref.bone_world_matrices()[target.ref.function_to_index()[new[-1][1]]][:3, 3] \
+                        if new[-1][1] in have else pos[-1]
+                    step = pos[-1] - base
+                    if np.linalg.norm(step) < 1e-6:
+                        step = np.array([0.0, 0.0, -1.0]) * fit.scale * 0.05
+                    tip = pos[-1] + step * 0.5
+                new.append((chain.end_func, parent, tip))
+                sk.parent[chain.end_func] = parent
+            target.ref = M.extend_skeleton(target.ref, new)
+            target.chains = [[*c.funcs, c.end_func] for c, _a in chains]
+        for pc in pieces:
+            pc.funcs = {b.function for b in pc.ref.bones}
 
         if texset is None:
             with_ext = any(t[2].lower().endswith(".tex") for t in body.mrl.textures)
@@ -430,6 +688,9 @@ def build(vrm_path, game, opts=None, log=print):
                 tex_dir = tex_dir[:-4] + "\\tex"
             texset = TextureSet(tex_dir + "\\vroidhunter", with_ext)
 
+        head_funcs = {f for f in (fit.bone_function.get(b) for b in HEAD_BONES) if f is not None}
+        if helm is not None:
+            head_funcs |= {f for chains in getattr(helm, "chains", []) for f in chains}
         ref_sign = _reference_winding(body.ref)
         culled = 0
         for pi, prim in enumerate(model.primitives):
@@ -451,25 +712,32 @@ def build(vrm_path, game, opts=None, log=print):
             if _winding_sign(pos, nrm, faces) * ref_sign < 0:
                 faces = faces[:, [0, 2, 1]]
 
-            # Give each triangle to the first piece whose skeleton has all its bones.
             active = wts > 0
             owner = np.full(len(faces), -1)
+            # The head (and hair) goes in the helmet model, like the game's own helmets.
+            if helm is not None:
+                in_head = np.vectorize(lambda f: int(f) in head_funcs)(funcs) | ~active
+                head_ok = in_head.all(axis=1)[faces].all(axis=1)
+                helm_ok = (np.vectorize(lambda f: int(f) in helm.funcs)(funcs) | ~active).all(axis=1)
+                owner[head_ok & helm_ok[faces].all(axis=1)] = pieces.index(helm)
+            # Everything else: the first piece whose skeleton has all its bones (body first).
             for k, pc in enumerate(pieces):
+                if pc is helm:
+                    continue
                 has = np.vectorize(lambda f: int(f) in pc.funcs)(funcs) | ~active
-                vert_ok = has.all(axis=1)
-                face_ok = vert_ok[faces].all(axis=1) & (owner < 0)
+                face_ok = has.all(axis=1)[faces].all(axis=1) & (owner < 0)
                 owner[face_ok] = k
             owner[owner < 0] = 0
 
             for k in np.unique(owner):
                 pc = pieces[k]
                 sub = faces[owner == k]
-                used = np.unique(sub)
+                used_v = np.unique(sub)
                 remap = -np.ones(len(pos), dtype=np.int64)
-                remap[used] = np.arange(len(used))
+                remap[used_v] = np.arange(len(used_v))
                 f2i = pc.ref.function_to_index()
-                ids = np.vectorize(lambda f: f2i[_nearest_present(int(f), f2i, sk.parent)])(funcs[used])
-                p_, n_, t_, u_, w_ = pos[used], nrm[used], tan[used], uvs[used], wts[used]
+                ids = np.vectorize(lambda f: f2i[_nearest_present(int(f), f2i, sk.parent)])(funcs[used_v])
+                p_, n_, t_, u_, w_ = pos[used_v], nrm[used_v], tan[used_v], uvs[used_v], wts[used_v]
                 sub = remap[sub]
                 if opts.double_sided and mat is not None and mat.double_sided:
                     n = len(p_)
@@ -501,8 +769,21 @@ def build(vrm_path, game, opts=None, log=print):
             result.files[pc.path] = M.write_mod3(pc.ref, pc.parts, pc.mat_names, blocktype, header)
             log("  %s: %d mesh parts, %d vertices" % (pc.path.rsplit("\\", 1)[-1], len(pc.parts),
                                                      sum(len(p.positions) for p in pc.parts)))
+            chains = getattr(pc, "chains", [])
+            if chains:
+                if template is None:
+                    template, source = _ctc_template(game, mods)
+                    log("  physics tuning copied from %s" % (source or "built-in defaults"))
+                stem = pc.path.rsplit(".", 1)[0]
+                ctc_path = _sibling(game, pc.path, ".ctc") or stem + ".ctc"
+                result.files[ctc_path] = C.write_ctc(template, chains)
+                if _sibling(game, pc.path, ".ccl") is None and pc is not body:
+                    body_ccl = _sibling(game, body.path, ".ccl")
+                    if body_ccl and _same_base_skeleton(pc.ref, body.ref):
+                        result.files[stem + ".ccl"] = game.read(body_ccl)
+                log("  %s: %d physics chains" % (ctc_path.rsplit("\\", 1)[-1], len(chains)))
 
-        # Every other model in the set draws nothing.
+        # Armor pieces the avatar doesn't use draw nothing, so they don't poke through.
         hidden = 0
         for path in mods:
             if path in result.files:
@@ -511,22 +792,8 @@ def build(vrm_path, game, opts=None, log=print):
             if blank is not None:
                 result.files[path] = blank
                 hidden += 1
-        log("  hid %d other %s armor models" % (hidden, label))
-
-        if opts.hide_face_and_hair:
-            count = 0
-            for folder in ("pl\\%s_face\\" % gender, "pl\\hair\\"):
-                for path in game.listdir(folder):
-                    if not path.lower().endswith(".mod3") or path in result.files:
-                        continue
-                    try:
-                        blank = _blank(M.read_mod3(game.read(path)))
-                    except Exception:
-                        blank = None
-                    if blank is not None:
-                        result.files[path] = blank
-                        count += 1
-            log("  hid %d face and hair models" % count)
+        if hidden:
+            log("  %d unused %s armor pieces made invisible" % (hidden, label))
 
     if not result.files:
         raise ValueError("armor %s was not found in the game files" % armor)

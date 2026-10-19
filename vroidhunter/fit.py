@@ -110,6 +110,9 @@ class FitResult:
     weights: list        # per primitive (n,4)
     scale: float
     notes: list
+    node_positions: object = None   # (nodes,3) every VRM node in hunter space
+    node_bone: dict = None          # node -> canonical humanoid ancestor
+    bone_function: dict = None      # canonical humanoid bone -> hunter function
 
 
 class HunterSkeleton:
@@ -136,7 +139,10 @@ def _pick_upper_arm(sk, candidates, elbow):
     return best
 
 
-def fit_vrm(model, sk, height_scale=1.0):
+def fit_vrm(model, sk, height_scale=1.0, node_functions=None):
+    """node_functions: optional {vrm node: hunter function} for joints that keep their
+    own bone (physics joints); everything else is merged into the humanoid bones."""
+    node_functions = node_functions or {}
     notes = []
     H = model.humanoid
 
@@ -363,7 +369,9 @@ def fit_vrm(model, sk, height_scale=1.0):
         for node in uniq:
             bone = node_bone[int(node)]
             aff = transform_for(bone)
-            func = resolve_function(bone)
+            func = node_functions.get(int(node))
+            if func is None:
+                func = resolve_function(bone)
             mask = prim.joints == node
             wk = np.where(mask, prim.weights, 0.0).sum(axis=1)
             sel = wk > 0
@@ -391,7 +399,10 @@ def fit_vrm(model, sk, height_scale=1.0):
         out_tan.append(newt)
         out_fn.append(f_ids)
         out_w.append(f_w)
-    return FitResult(out_pos, out_nrm, out_tan, out_fn, out_w, s, notes)
+    node_pos = np.array([transform_for(node_bone[i]).apply(nodes_w[i][None, :])[0]
+                         for i in range(len(model.nodes))]) if model.nodes else np.zeros((0, 3))
+    bone_function = {b: resolve_function(b) for b in set(node_bone.values())}
+    return FitResult(out_pos, out_nrm, out_tan, out_fn, out_w, s, notes, node_pos, node_bone, bone_function)
 
 
 _PARENT = {

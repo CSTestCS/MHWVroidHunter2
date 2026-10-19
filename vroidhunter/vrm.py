@@ -42,6 +42,16 @@ class Primitive:
 
 
 @dataclass
+class SpringChain:
+    """A linear chain of spring (physics) joints, root first."""
+    nodes: list
+    stiffness: float = 1.0
+    gravity: float = 0.0
+    drag: float = 0.4
+    radius: float = 0.02
+
+
+@dataclass
 class VrmModel:
     version: int
     nodes: list
@@ -53,6 +63,7 @@ class VrmModel:
     images: list             # raw image bytes per image index
     title: str = ""
     meta: dict = field(default_factory=dict)
+    springs: list = field(default_factory=list)
 
     def bone_position(self, name):
         node = self.humanoid.get(name)
@@ -260,6 +271,68 @@ def _materials(g):
     return mats
 
 
+def _children_map(nodes):
+    return {i: list(n.get("children", [])) for i, n in enumerate(nodes)}
+
+
+def _subtree_depth(children, node, memo):
+    if node not in memo:
+        memo[node] = 1 + max((_subtree_depth(children, c, memo) for c in children.get(node, [])), default=0)
+    return memo[node]
+
+
+def _linear_chains(children, root):
+    """Split a joint tree into linear chains; the deepest branch continues each chain."""
+    memo = {}
+    chains, todo = [], [root]
+    while todo:
+        start = todo.pop(0)
+        chain, cur = [start], start
+        while children.get(cur):
+            kids = sorted(children[cur], key=lambda c: -_subtree_depth(children, c, memo))
+            todo.extend(kids[1:])
+            cur = kids[0]
+            chain.append(cur)
+        chains.append(chain)
+    return chains
+
+
+def _springs(js):
+    ext = js.get("extensions", {})
+    nodes = js.get("nodes", [])
+    out = []
+    if "VRMC_springBone" in ext:
+        for spring in ext["VRMC_springBone"].get("springs", []):
+            joints = [j for j in spring.get("joints", []) if "node" in j]
+            if len(joints) < 1:
+                continue
+            first = joints[0]
+            out.append(SpringChain(
+                nodes=[j["node"] for j in joints],
+                stiffness=float(first.get("stiffness", 1.0)),
+                gravity=float(first.get("gravityPower", 0.0)),
+                drag=float(first.get("dragForce", 0.5)),
+                radius=float(first.get("hitRadius", 0.02))))
+    elif "VRM" in ext:
+        children = _children_map(nodes)
+        seen = set()
+        for group in ext["VRM"].get("secondaryAnimation", {}).get("boneGroups", []):
+            for root in group.get("bones", []):
+                if root is None or root < 0 or root in seen:
+                    continue
+                for chain in _linear_chains(children, root):
+                    chain = [n for n in chain if n not in seen]
+                    seen.update(chain)
+                    if chain:
+                        out.append(SpringChain(
+                            nodes=chain,
+                            stiffness=float(group.get("stiffiness", group.get("stiffness", 1.0))),
+                            gravity=float(group.get("gravityPower", 0.0)),
+                            drag=float(group.get("dragForce", 0.4)),
+                            radius=float(group.get("hitRadius", 0.02))))
+    return out
+
+
 def compute_tangents(pos, nrm, uv, faces):
     tan = np.zeros_like(pos)
     bit = np.zeros_like(pos)
@@ -406,4 +479,10 @@ def load_vrm_bytes(data, base_dir="."):
     elif "VRMC_vrm" in ext:
         meta = ext["VRMC_vrm"].get("meta", {})
     title = meta.get("title") or meta.get("name") or ""
-    return VrmModel(version, nodes, parents, world, humanoid, prims, _materials(g), images, title, meta)
+    springs = [c for c in _springs(js) if all(0 <= n < len(nodes) for n in c.nodes)]
+    # Humanoid bones are animated by the game, never by physics.
+    human_nodes = set(humanoid.values())
+    springs = [SpringChain([n for n in c.nodes if n not in human_nodes], c.stiffness, c.gravity, c.drag, c.radius)
+               for c in springs]
+    springs = [c for c in springs if c.nodes]
+    return VrmModel(version, nodes, parents, world, humanoid, prims, _materials(g), images, title, meta, springs)

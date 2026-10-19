@@ -122,10 +122,14 @@ def make_vrm(version=0, facing=+1):
     hair_index = len(nodes)
     nodes.append({"name": "J_Sec_Hair1", "translation": [0.0, 0.12, -0.05 * facing], "children": []})
     nodes[index["head"]]["children"].append(hair_index)
+    hair2_index = len(nodes)
+    nodes.append({"name": "J_Sec_Hair2", "translation": [0.0, -0.06, 0.0], "children": []})
+    nodes[hair_index]["children"].append(hair2_index)
     joint_nodes = list(range(len(nodes)))
     joint_world = {i: None for i in joint_nodes}
     for i in joint_nodes:
         joint_world[i] = world[names[i]] if i < len(names) else world["head"] + np.array([0, 0.12, -0.05 * facing])
+    joint_world[hair2_index] = joint_world[hair_index] + np.array([0, -0.06, 0])
 
     # Body mesh: tubes along each segment, skinned to the first bone (blended at the joint).
     pos, nrm, uv, joints, weights, faces = [], [], [], [], [], []
@@ -152,7 +156,9 @@ def make_vrm(version=0, facing=+1):
     hair = dict(pos=hp, nrm=np.tile(np.array([0, 0, facing], np.float32), (8, 1)),
                 uv=np.array([[0.05, 1], [0.45, 1], [0.45, 0], [0.05, 0],
                              [0.55, 1], [0.95, 1], [0.95, 0], [0.55, 0]], np.float32),
-                joints=np.tile(np.array([hair_index, 0, 0, 0], np.uint16), (8, 1)),
+                # bottom edge (y = h0) follows the second spring joint, top edge the first
+                joints=np.array([[hair2_index if v in (0, 1, 4, 5) else hair_index, 0, 0, 0] for v in range(8)],
+                                np.uint16),
                 weights=np.tile(np.array([1, 0, 0, 0], np.float32), (8, 1)),
                 # second quad sits on the transparent half (u > 0.5) and must be culled
                 faces=np.array([[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]], np.uint32))
@@ -217,10 +223,16 @@ def make_vrm(version=0, facing=+1):
             n.pop("children", None)
     if version == 0:
         js["extensions"] = {"VRM": {"meta": {"title": "Test Avatar"},
-                                    "humanoid": {"humanBones": [{"bone": n, "node": index[n]} for n in names]}}}
+                                    "humanoid": {"humanBones": [{"bone": n, "node": index[n]} for n in names]},
+                                    "secondaryAnimation": {"boneGroups": [
+                                        {"stiffiness": 1.0, "gravityPower": 0, "dragForce": 0.4,
+                                         "hitRadius": 0.02, "bones": [hair_index]}]}}}
     else:
         js["extensions"] = {"VRMC_vrm": {"specVersion": "1.0", "meta": {"name": "Test Avatar"},
-                                         "humanoid": {"humanBones": {n: {"node": index[n]} for n in names}}}}
+                                         "humanoid": {"humanBones": {n: {"node": index[n]} for n in names}}},
+                             "VRMC_springBone": {"specVersion": "1.0", "springs": [
+                                 {"name": "hair", "joints": [{"node": hair_index, "stiffness": 1.0},
+                                                             {"node": hair2_index, "stiffness": 1.0}]}]}}
     js_bytes = json.dumps(js).encode()
     while len(js_bytes) % 4:
         js_bytes += b" "
@@ -277,7 +289,8 @@ def _colmajor(m):
     return m.T.reshape(16).tolist()
 
 
-def make_hunter_mod3(bones, material_names=("Ch_Pl_Body_Mt",), flip_winding=False, offset=(0, 0, 0)):
+def make_hunter_mod3(bones, material_names=("Ch_Pl_Body_Mt",), flip_winding=False, offset=(0, 0, 0),
+                     box=((-15, 15), (-10, 10), (95, 145))):
     funcs = sorted(bones)
     index = {f: i for i, f in enumerate(funcs)}
     world = {f: np.array(bones[f][1], float) + offset for f in funcs}
@@ -312,7 +325,8 @@ def make_hunter_mod3(bones, material_names=("Ch_Pl_Body_Mt",), flip_winding=Fals
                   for f in funcs], lm, am, bytes(remap), bytes(skel),
                  struct.pack("<i3i4f", 0, 0, 0, 0, 0, 0, 0, 0) * 2, list(material_names), [], b"\x01\x02\x03\x04")
     # A torso box so the reference has geometry for the winding check.
-    cube = np.array([[x, y, z] for x in (-15, 15) for y in (-10, 10) for z in (95, 145)], float) + offset
+    (x0, x1), (y0, y1), (z0, z1) = box
+    cube = np.array([[x, y, z] for x in (x0, x1) for y in (y0, y1) for z in (z0, z1)], float) + offset
     center = cube.mean(axis=0)
     faces = []
     quads = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]

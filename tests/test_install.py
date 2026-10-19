@@ -1,5 +1,3 @@
-import os
-
 from vroidhunter import game as G
 
 

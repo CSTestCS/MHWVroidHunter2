@@ -3,6 +3,7 @@ import struct
 import numpy as np
 import pytest
 
+from vroidhunter import ctc as C
 from vroidhunter import mod3 as M
 from vroidhunter import mrl3 as R
 from vroidhunter import tex as X
@@ -11,7 +12,7 @@ from vroidhunter.build import Options, armor_sets, build
 from vroidhunter.chunk import FolderFiles
 from vroidhunter.vrm import load_vrm_bytes
 
-from synth import hunter_bones, make_game_folder, make_vrm
+from synth import hunter_bones, make_game_folder, make_hunter_mod3, make_vrm
 
 
 def decode_vertices(mod, i):
@@ -54,15 +55,34 @@ def test_vrm_loader_reads_humanoid():
     assert model1.version == 1
 
 
+BASE = "pl\\f_equip\\pl001_0000\\%s\\mod\\f_%s001.%s"
+
+
+def piece(result, part, ext="mod3"):
+    return result.files.get(BASE % (part, part, ext))
+
+
+def gather(mod):
+    """All vertices of a model with their main bone function."""
+    out = []
+    for i in range(mod.header["meshCount"]):
+        pos, nrm, w, ids, faces = decode_vertices(mod, i)
+        funcs = np.vectorize(lambda j: mod.bones[j].function)(ids)
+        out.append((i, pos, nrm, w, funcs, faces))
+    return out
+
+
 def test_expected_files(built):
     result, files, _ = built
     paths = set(result.files)
     for g in ("f", "m"):
         for part in ("helm", "body", "arm", "wst", "leg"):
             assert "pl\\%s_equip\\pl001_0000\\%s\\mod\\%s_%s001.mod3" % (g, part, g, part) in paths
-        assert "pl\\%s_equip\\pl001_0000\\body\\mod\\%s_body001.mrl3" % (g, g) in paths
-        assert "pl\\%s_face\\face000\\mod\\face000.mod3" % g in paths
-    assert "pl\\hair\\hair000\\mod\\hair000.mod3" in paths
+        for part in ("helm", "body"):
+            assert "pl\\%s_equip\\pl001_0000\\%s\\mod\\%s_%s001.mrl3" % (g, part, g, part) in paths
+    # Nothing outside the chosen armor set is touched: no faces, no hair, no other gear.
+    for p in paths:
+        assert p.startswith("pl\\f_equip\\pl001_0000\\") or p.startswith("pl\\m_equip\\pl001_0000\\"), p
     texes = [p for p in paths if p.endswith(".tex")]
     assert texes, "no textures written"
     for p in texes:
@@ -73,85 +93,124 @@ def test_expected_files(built):
         assert offsets[-1] < len(result.files[p])
 
 
-def test_body_mesh_fits_hunter(built):
+def test_avatar_fits_hunter(built):
     result, files, flip = built
-    body = M.read_mod3(result.files["pl\\f_equip\\pl001_0000\\body\\mod\\f_body001.mod3"])
-    ref = M.read_mod3(files.read("pl\\f_equip\\pl001_0000\\body\\mod\\f_body001.mod3"))
-    assert body.skeleton_raw == ref.skeleton_raw
-    assert body.header["meshCount"] >= 2
-    func_of = {i: b.function for i, b in enumerate(body.bones)}
+    body = M.read_mod3(piece(result, "body"))
+    helm = M.read_mod3(piece(result, "helm"))
+    ref = M.read_mod3(files.read(BASE % ("body", "body", "mod3")))
+    assert body.skeleton_raw == ref.skeleton_raw   # no physics on the body in this avatar
     bones = hunter_bones()
     all_pos, all_funcs, body_z = [], [], []
-    for i in range(body.header["meshCount"]):
-        pos, nrm, w, ids, faces = decode_vertices(body, i)
-        assert faces.min() >= 0 and faces.max() < len(pos)
-        assert np.all(w >= -1e-3) and np.allclose(w.sum(axis=1), 1, atol=1e-6)
-        assert ids.max() < len(body.bones)
-        all_pos.append(pos)
-        if "Hair" not in body.materials[body.meshes[i]["materialIdx"]]:
-            body_z.append(pos[:, 2])
-        all_funcs.append(np.vectorize(func_of.get)(ids[:, 0]))
-        # Winding must agree with the reference model's convention.
-        fn = np.cross(pos[faces[:, 1]] - pos[faces[:, 0]], pos[faces[:, 2]] - pos[faces[:, 0]])
-        vn = nrm[faces].sum(axis=1)
-        agree = np.sum(fn * vn, axis=1)
-        frac = np.mean(agree > 0) if not flip else np.mean(agree < 0)
-        assert frac > 0.9
+    for mod in (body, helm):
+        for i, pos, nrm, w, funcs, faces in gather(mod):
+            assert faces.min() >= 0 and faces.max() < len(pos)
+            assert np.all(w >= -1e-3) and np.allclose(w.sum(axis=1), 1, atol=1e-6)
+            all_pos.append(pos)
+            all_funcs.append(funcs[:, 0])
+            if "Hair" not in mod.materials[mod.meshes[i]["materialIdx"]]:
+                body_z.append(pos[:, 2])
+            fn = np.cross(pos[faces[:, 1]] - pos[faces[:, 0]], pos[faces[:, 2]] - pos[faces[:, 0]])
+            agree = np.sum(fn * nrm[faces].sum(axis=1), axis=1)
+            assert (np.mean(agree > 0) if not flip else np.mean(agree < 0)) > 0.9
     pos = np.vstack(all_pos)
     funcs = np.concatenate(all_funcs)
-    # Height: ankle-to-head span matches the hunter (Z up in the fake game).
     z = np.concatenate(body_z)
     assert z.max() == pytest.approx(156, abs=6)
     assert z.min() == pytest.approx(9 - 6, abs=8)
-    # Vertices driven by each hunter bone sit near that bone.
     for f in (3, 7, 8, 15, 19):
-        target = np.array(bones[f][1])
         pts = pos[funcs == f]
         assert len(pts), "no vertices weighted to bone %d" % f
-        d = np.linalg.norm(pts - target, axis=1).min()
-        assert d < 10, (f, d)
-    # Left hand vertices must be on the hunter's left side (-X in the fake game).
+        assert np.linalg.norm(pts - np.array(bones[f][1]), axis=1).min() < 10, f
     assert np.mean(pos[funcs == 8][:, 0]) < 0
     assert np.mean(pos[funcs == 12][:, 0]) > 0
-    # Toes point the way the hunter faces (-Y).
     assert np.mean(pos[funcs == 16][:, 1]) < -2
+
+
+def test_head_and_hair_go_in_the_helmet(built):
+    result, _, _ = built
+    helm = M.read_mod3(piece(result, "helm"))
+    body = M.read_mod3(piece(result, "body"))
+    assert any("Hair" in n for n in helm.materials)
+    assert not any("Hair" in n for n in body.materials)
+    for _, pos, _, w, funcs, _ in gather(helm):
+        used = set(funcs[w > 0].ravel())
+        assert used <= {4} | set(range(150, 247)), used
+
+
+def test_spring_bones_become_physics(built):
+    result, _, _ = built
+    helm = M.read_mod3(piece(result, "helm"))
+    by_func = {b.function: (i, b) for i, b in enumerate(helm.bones)}
+    ctc = piece(result, "helm", "ctc")
+    assert ctc is not None
+    chains = C.read_chains(ctc)
+    assert len(chains) == 1
+    fixed, funcs = chains[0]
+    assert len(funcs) == 3 and fixed[0] == 1 and all(f >= 150 for f in funcs)
+    # Chain bones exist in the skeleton, parented root -> head bone, then along the chain.
+    root_parent = helm.bones[by_func[funcs[0]][1].parent].function
+    assert root_parent == 4
+    assert helm.bones[by_func[funcs[1]][1].parent].function == funcs[0]
+    assert helm.bones[by_func[funcs[2]][1].parent].function == funcs[1]
+    # The hair card is weighted to the physics bones; the tip bone carries no weight.
+    hair_funcs = set()
+    for i, pos, _, w, f, _ in gather(helm):
+        if "Hair" in helm.materials[helm.meshes[i]["materialIdx"]]:
+            hair_funcs |= set(f[w > 0].ravel())
+    assert hair_funcs == {funcs[0], funcs[1]}
+    # Skeleton stays consistent: world matrix of each new bone = inverse of its AMatrix.
+    worlds = helm.bone_world_matrices()
+    for f in funcs:
+        i = by_func[f][0]
+        parent_world = worlds[helm.bones[i].parent]
+        assert np.allclose(parent_world @ helm.lmatrices[i], worlds[i], atol=1e-3)
+    # The fitted bone sits above the hunter's head bone.
+    assert worlds[by_func[funcs[0]][0]][2, 3] > hunter_bones()[4][1][2]
+
+
+def test_physics_can_be_turned_off(tmp_path):
+    data, _ = make_vrm(0)
+    (tmp_path / "a.vrm").write_bytes(data)
+    make_game_folder(str(tmp_path / "g"), genders=("f",))
+    result = build(str(tmp_path / "a.vrm"), FolderFiles(str(tmp_path / "g")),
+                   Options(genders=("f",), physics=False), log=lambda m: None)
+    assert not any(p.endswith(".ctc") for p in result.files)
 
 
 def test_transparent_triangles_culled(built):
     result, _, _ = built
-    body = M.read_mod3(result.files["pl\\f_equip\\pl001_0000\\body\\mod\\f_body001.mod3"])
-    hair_mats = [i for i, n in enumerate(body.materials) if "Hair" in n]
-    assert hair_mats
-    hair_faces = sum(h["faceCount"] // 3 for h in body.meshes if h["materialIdx"] in hair_mats)
+    helm = M.read_mod3(piece(result, "helm"))
+    hair_mats = [i for i, n in enumerate(helm.materials) if "Hair" in n]
+    hair_faces = sum(h["faceCount"] // 3 for h in helm.meshes if h["materialIdx"] in hair_mats)
     # 2 visible triangles, doubled for the double-sided material; the transparent quad is gone.
     assert hair_faces == 4
 
 
 def test_materials_link_up(built):
     result, _, _ = built
-    body = M.read_mod3(result.files["pl\\f_equip\\pl001_0000\\body\\mod\\f_body001.mod3"])
-    mrl = R.read_mrl3(result.files["pl\\f_equip\\pl001_0000\\body\\mod\\f_body001.mrl3"])
-    assert {jamcrc(n) for n in body.materials} == {m.name_hash for m in mrl.materials}
     paths = {p.lower() for p in result.files}
-    for m in mrl.materials:
-        roles = {}
-        for b in m.bindings:
-            if b.res_type & 0xF == R.RES_TEXTURE:
-                assert 1 <= b.tex_idx <= len(mrl.textures)
-                roles[R.slot_role(b.map_type)[0]] = mrl.textures[b.tex_idx - 1][2]
-        for role in ("albedo", "normal", "rmt", "black"):
-            assert (roles[role] + ".tex").lower() in paths, role
-        # Unknown slots keep pointing at the original game texture.
-        assert roles["unknown"].endswith("common_special")
-        assert m.params == struct.pack("<16f", *([1.0] * 16))
+    for part in ("body", "helm"):
+        mod = M.read_mod3(piece(result, part))
+        mrl = R.read_mrl3(piece(result, part, "mrl3"))
+        assert {jamcrc(n) for n in mod.materials} == {m.name_hash for m in mrl.materials}
+        for m in mrl.materials:
+            roles = {}
+            for b in m.bindings:
+                if b.res_type & 0xF == R.RES_TEXTURE:
+                    assert 1 <= b.tex_idx <= len(mrl.textures)
+                    roles[R.slot_role(b.map_type)[0]] = mrl.textures[b.tex_idx - 1][2]
+            for role in ("albedo", "normal", "rmt", "black"):
+                assert (roles[role] + ".tex").lower() in paths, role
+            assert roles["unknown"].endswith("common_special")
+            assert m.params == struct.pack("<16f", *([1.0] * 16))
 
 
-def test_blank_models_are_valid(built):
+def test_unused_pieces_are_invisible(built):
     result, files, _ = built
-    helm = M.read_mod3(result.files["pl\\f_equip\\pl001_0000\\helm\\mod\\f_helm001.mod3"])
-    assert helm.header["meshCount"] == 1
-    assert helm.materials == ["Ch_Pl_Helm_Mt"]
-    pos, nrm, w, ids, faces = decode_vertices(helm, 0)
+    arm = M.read_mod3(piece(result, "arm"))
+    assert arm.header["meshCount"] == 1
+    assert arm.materials == ["Ch_Pl_Arm_Mt"]
+    pos, nrm, w, ids, faces = decode_vertices(arm, 0)
     assert len(pos) == 3 and np.allclose(pos, pos[0])
 
 
@@ -201,3 +260,37 @@ def test_partial_body_skeleton_moves_legs_to_another_piece(tmp_path):
                 used_anywhere |= used
                 assert path.replace(".mod3", ".mrl3") in result.files
     assert {15, 19, 7, 11} <= used_anywhere
+
+
+def test_helm_coverage_tells_full_from_open_helmets():
+    from vroidhunter.build import helm_coverage
+    bones = hunter_bones()
+    # The fake hunter faces -Y; its face is a small box in front of the head bone.
+    face = M.read_mod3(make_hunter_mod3(bones, box=((-6, 6), (-9, -3), (152, 166))))
+    face_pts = np.vstack([face.mesh_geometry(0)[0]])
+    full = M.read_mod3(make_hunter_mod3(bones, box=((-11, 11), (-13, 11), (146, 175))))
+    cap = M.read_mod3(make_hunter_mod3(bones, box=((-11, 11), (-8, 11), (167, 178))))
+    assert helm_coverage(full, face_pts) > 0.8
+    assert helm_coverage(cap, face_pts) < 0.5
+
+
+def test_physics_budget_thins_long_chains():
+    from vroidhunter.build import _plan_physics
+    from vroidhunter.vrm import SpringChain
+
+    class Prim:
+        joints = np.arange(200).reshape(-1, 1)
+        weights = np.ones((200, 1))
+
+    class Model:
+        springs = [SpringChain(list(range(0, 120))), SpringChain(list(range(120, 125)))]
+        primitives = [Prim()]
+
+    planned, node_funcs = _plan_physics(Model(), set(range(150, 160)), 255, lambda m: None)
+    used = sum(len(c.nodes) + 1 for c in planned)
+    assert used <= 97 - 10
+    # Every spring joint still follows some physics bone, and ids are unique and free.
+    assert set(range(125)) <= set(node_funcs)
+    ids = [f for c in planned for f in c.funcs + [c.end_func]]
+    assert len(ids) == len(set(ids)) and not set(ids) & set(range(150, 160))
+    assert all(c.nodes[0] in (0, 120) for c in planned)

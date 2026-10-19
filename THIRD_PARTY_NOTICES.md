@@ -40,6 +40,8 @@ using documentation and research published by the MHW modding community:
 * AsteriskAmpersand – [Mod3-MHW-Importer](https://github.com/AsteriskAmpersand/Mod3-MHW-Importer)
   and [Material-Editing](https://github.com/AsteriskAmpersand/Material-Editing) research.
 * Lukas Scone / PredatorCZ – original MT Framework model research.
+* AsteriskAmpersand, Karbon, Statyk – [CTC-MHW-Research](https://github.com/AsteriskAmpersand/CTC-MHW-Research)
+  and the wiki's jigglebone guide (.ctc / .ccl physics layout).
 * Jodo – [MHW Texture Converter](https://github.com/JodoZT/MHWTexConvertor) (tex header layout).
 * Statyk, Karbon and contributors to the
   [MonsterHunterWorldModding wiki](https://github.com/Ezekial711/MonsterHunterWorldModding/wiki)
@@ -49,8 +51,10 @@ using documentation and research published by the MHW modding community:
 
 * [NumPy](https://numpy.org/) – BSD licence.
 * [Pillow](https://python-pillow.org/) – HPND licence.
-* Oodle (`oo2core_8_win64.dll`) is **not** distributed; the copy that ships
-  with the game is loaded from the game folder.
+* Oodle (`oo2core_8_win64.dll`) is **not** distributed. It is found in another
+  installed game, chosen by the user, or (with the user's permission) downloaded
+  from Warframe's public update server like MHWNoChunk does; known MD5
+  checksums come from MHWNoChunk.
 
 Monster Hunter is a trademark of Capcom. This project is not affiliated with
 Capcom, Pixiv (VRoid) or the VRM Consortium.

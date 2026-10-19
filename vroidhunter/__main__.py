@@ -3,7 +3,7 @@
 No arguments (or just a .vrm path, e.g. by dropping the file on the .exe)
 opens the window. Subcommands give a command line:
 
-    VRoidHunter install  model.vrm [--game DIR] [--armor pl001_0000] [--keep-face] [--height 1.0]
+    VRoidHunter install  model.vrm [--game DIR] [--armor pl001_0000] [--no-physics] [--height 1.0]
     VRoidHunter export   model.vrm OUTDIR [same options]
     VRoidHunter uninstall [--game DIR]
     VRoidHunter armors   [--game DIR]
@@ -16,7 +16,8 @@ import sys
 
 def _cli(argv):
     from . import game as G
-    from .build import DEFAULT_ARMOR, Options, armor_sets, build
+    from .build import DEFAULT_ARMOR, FULL_HELMET, Options, build, scan_armor
+    from . import oodle as O
     from .chunk import FolderFiles, GameFiles
 
     ap = argparse.ArgumentParser(prog="VRoidHunter")
@@ -29,7 +30,10 @@ def _cli(argv):
         p.add_argument("--extracted", default=None,
                        help="use a folder of already-extracted game files instead of reading chunks")
         p.add_argument("--armor", default=DEFAULT_ARMOR)
-        p.add_argument("--keep-face", action="store_true", help="do not hide the hunter's own face and hair")
+        p.add_argument("--no-physics", action="store_true", help="don't convert spring bones to physics")
+        p.add_argument("--oodle", default=None, help="path to oo2core_8_win64.dll (or oo2core_9)")
+        p.add_argument("--download-oodle", action="store_true",
+                       help="if oo2core_8_win64.dll isn't found, download it from Warframe's public update server")
         p.add_argument("--female-only", action="store_true")
         p.add_argument("--height", type=float, default=1.0, help="height multiplier (1.0 = hunter height)")
 
@@ -48,7 +52,13 @@ def _cli(argv):
             return FolderFiles(args.extracted)
         if not G.is_game_dir(game_dir):
             sys.exit("Could not find Monster Hunter: World. Pass --game \"C:\\...\\Monster Hunter World\".")
-        return GameFiles(game_dir)
+        dll = args.oodle or O.find_oodle(game_dir, log=print)
+        if not dll and args.download_oodle:
+            dll = O.download_oodle()
+        if not dll:
+            sys.exit("oo2core_8_win64.dll not found. MHW only ships an older copy that can't read its files. "
+                     "Pass --oodle PATH (copy it from another game) or --download-oodle.")
+        return GameFiles(game_dir, oodle_path=dll)
 
     if args.cmd == "uninstall":
         if not G.is_game_dir(game_dir):
@@ -57,11 +67,12 @@ def _cli(argv):
         return
     if args.cmd == "armors":
         gf = files()
-        print("\n".join(armor_sets(gf)))
+        for armor, cov in scan_armor(gf, "f", log=lambda m: None):
+            print(armor + ("  full helmet" if cov is not None and cov >= FULL_HELMET else ""))
         return
 
     opts = Options(armor=args.armor, genders=("f",) if args.female_only else ("f", "m"),
-                   hide_face_and_hair=not args.keep_face, height_scale=args.height)
+                   physics=not args.no_physics, height_scale=args.height)
     gf = files()
     try:
         result = build(args.vrm, gf, opts)

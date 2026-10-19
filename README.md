@@ -1,97 +1,94 @@
 # VRoid Hunter
 
-Use any `.vrm` avatar (VRoid Studio, VRM 0.x or 1.0) as your hunter's look in
-**Monster Hunter: World** (Steam).
+Play **Monster Hunter: World** (Steam) as your VRoid character. Give VRoid
+Hunter any `.vrm` avatar (VRoid Studio, VRM 0.x or 1.0) and it turns one armor
+set into your avatar: hair, skirts and accessories keep their physics, and
+the avatar is sized to your hunter's height.
 
-VRoid Hunter is a single `VRoidHunter.exe`. Pick your `.vrm`, pick an armor
-set, press **Install**. When you wear that armor set, your hunter shows up as
-your avatar, sized to your hunter's height and animated by the game.
-
-Everything happens on your own PC. The mod only changes local model files,
-never your save, the network, or anything other players download. Other
-players keep seeing your real armor.
+**Why an armor set?** In MHW your hunter's look *is* the armor they wear;
+there's no separate character model to swap. Every model mod for the game
+works this way. You pick one set (ideally one you own as layered armor),
+and wearing it on all five slots makes your hunter your avatar. Nothing else
+in the game changes. Other hunters and other armor look normal, and only your
+PC sees the change.
 
 ## What you need
 
-1. Monster Hunter: World on Steam (base game or Iceborne).
-2. **Stracker's Loader** ([Nexus Mods](https://www.nexusmods.com/monsterhunterworld/mods/1982)).
-   Since Iceborne, the game only loads mods from `nativePC` when this loader
-   is installed. Most modded setups already have it. Copy its files next to
-   `MonsterHunterWorld.exe`. VRoid Hunter warns you if it can't find the loader.
+1. Monster Hunter: World on Steam (with Iceborne updates).
+2. **Stracker's Loader** ([Nexus Mods](https://www.nexusmods.com/monsterhunterworld/mods/1982)),
+   a one-time install that lets the game load mods at all. Copy its files next to
+   `MonsterHunterWorld.exe`.
 3. Your avatar as a `.vrm` file. In VRoid Studio, use *Export → Export as VRM*.
 
 ## Install
 
-1. Download `VRoidHunter.exe` from the latest
-   [release](../../releases) (or from the *Actions* tab → latest run → *VRoidHunter* artifact).
-2. Close the game and run `VRoidHunter.exe`. You can also drop your `.vrm` onto the exe.
-3. Choose your `.vrm`. The game folder is detected from Steam; use *Browse* if it isn't.
-4. Choose the armor set to replace. The default is the Leather set (`pl001_0000`).
-   *Scan game* lists every set your game has.
-5. Press **Install**. This takes about 10–60 seconds.
-6. In game, equip that armor set on every slot. Its layered armor works too,
-   so you can keep your real armor's skills. Make sure *Show headgear* is on.
+1. Download `VRoidHunter.exe` from the latest [release](../../releases)
+   (or from the *Actions* tab → latest run → *VRoidHunter* artifact).
+2. Close the game and run `VRoidHunter.exe`. You can also drop your `.vrm` onto it.
+3. Choose your `.vrm`. The game folder is found through Steam.
+4. Choose the armor set. VRoid Hunter checks every set in your game and marks
+   the ones with a **full helmet**; those hide your hunter's own face under
+   the avatar's head. Pick one you own as armor or layered armor.
+5. Press **Install** (10–60 seconds).
+6. In game, wear that set (or its layered armor) on all five slots and keep
+   *Show headgear* on.
 
-Want a different avatar? Run the exe again and press **Install**; the old one
-is replaced. To remove the mod, press **Uninstall**. If VRoid Hunter replaced
-another mod's files, it restores them.
+To use a different avatar, run it again and press **Install**. **Uninstall**
+removes everything it added. **Export to folder…** writes a `nativePC` folder for mod managers.
 
-If you use a mod manager, **Export to folder…** writes a ready-made `nativePC`
-folder instead of installing.
+### The one extra file (oo2core_8_win64.dll)
+
+MHW stores its files compressed with a library called Oodle. The game only
+includes an old copy that can't open its current files, so VRoid Hunter needs
+the newer `oo2core_8_win64.dll` (or `oo2core_9`) to read your hunter's skeleton.
+It looks for one in your other installed games first. If there isn't one, it
+asks before downloading it from Warframe's public update server, which is where
+it's freely hosted and where the community MHW tools get it too. The file is
+checked against known checksums. You can also pick the file yourself.
 
 ## What it does
 
-* **Reads the game's own armor.** The exe opens your game's `chunkG*.bin`
-  archives with the Oodle DLL that ships with the game. No game files are
-  included in this download.
-* **Fits the avatar to the hunter skeleton.** The avatar is rotated to face
-  the right way, then scaled so its ankle-to-head height equals the hunter's.
-  Each limb is then moved and stretched so its joints sit on the hunter's
-  joints, arms included (the hunter's rest pose is an A-pose, not a T-pose).
-  Because the mesh is bound to the hunter's own skeleton, the game's height
-  slider scales your avatar too. The *Height* setting lets you scale it 50–150%.
-* **Re-weights the mesh.** VRM humanoid bones are mapped to the hunter's bone
-  IDs, including fingers and the forearm twist bone. Hair, skirt and accessory
-  bones follow their nearest body bone.
-* **Builds the files.** The body model (`.mod3`), its materials (`.mrl3`, cloned
-  from the armor's own material so the shader parameters stay valid) and
-  textures (`.tex`). The armor's other pieces (helm, arms, waist, legs) are
-  replaced with invisible models so they don't overlap the avatar.
-* **Hides the hunter's own face and hair** (optional, on by default) so they
-  don't poke through the avatar's head.
+* **Fits the avatar to your hunter.** The avatar is turned to face the right
+  way and scaled so its height matches your hunter's. Each limb is then lined up
+  with the hunter's joints (the hunter stands in an A-pose). The game's height
+  slider scales the avatar like it scales armor.
+* **Keeps the physics.** VRM spring bones (hair, skirts, ribbons, tails) become
+  MHW physics chains (`.ctc`), using tuning values from a hair physics file in your own game.
+* **Splits the avatar like real armor.** The head and hair go in the helmet
+  model, the rest in the body model. Armor pieces the avatar doesn't need (arms,
+  waist, legs) are made invisible so they don't poke through.
+* **Keeps the look.** Textures and materials come from the VRM, using the
+  armor's own shader settings.
 
 ## Limitations
 
-* **Hair, skirts and accessories don't sway.** They move rigidly with the
-  head or body bone they're attached to; VRM spring bones aren't converted to
-  MHW physics.
+* **Not tested in the game yet.** The file formats come from community research
+  and the converter is tested on synthetic data and sample VRMs. Physics may need
+  tuning. If something looks wrong, open an issue with a screenshot.
 * **No facial expressions.** The avatar keeps its default face.
-* **Partly transparent parts.** Triangles that are fully see-through in the
-  texture are removed, which handles most eyelashes, eye highlights and hair
-  tips. Soft, semi-transparent edges render solid.
-* **The whole armor set becomes the avatar.** Anyone else wearing the same set
-  will also look like your avatar on your screen, so choose a set you rarely
-  see.
-* **"Hide face and hair" applies to every hunter on your screen.** Other
-  players' hunters lose their face and hair too, unless their helmet covers it.
-  Untick the option if that bothers you.
-* **Not tested in the game yet.** The file formats come from community
-  research and the converter is tested against synthetic data. Some armor sets
-  may need a different choice. If one doesn't work, pick another set or open an issue.
+* **Partly transparent parts.** Fully see-through triangles are removed (eyelashes,
+  eye highlights, hair tips), but soft semi-transparent edges render solid.
+* **Physics bone limit.** The game allows about 90 extra physics bones per
+  armor set. Very detailed hair is thinned out to fit, and every strand still moves.
+* **Same set, same look.** Other players wearing the set you picked also look
+  like your avatar on your screen, so pick one you rarely see.
+* **Open-faced helmets.** With a set whose helmet doesn't cover the face, your
+  hunter's own face may show through the avatar's head. Use a "full helmet" set.
 
 ## Troubleshooting
 
 | Problem | Fix |
 | --- | --- |
-| No change in game | Install Stracker's Loader. Equip the exact armor set you picked, on every slot. |
-| "oo2core_8_win64.dll was not found" | The game folder is wrong. Choose the folder that contains `MonsterHunterWorld.exe`. |
-| Avatar's head missing | Turn *Show headgear* on in the game options. |
-| Game crashes on load | Press **Uninstall**, then try a different armor set. |
+| No change in game | Install Stracker's Loader. Wear the exact set you picked on all five slots. |
+| Avatar has your hunter's head | Turn *Show headgear* on, and wear the helmet of the set. |
+| Your hunter's face shows through | Pick a set marked "full helmet". |
+| Game crashes on load | Press **Uninstall**, then try another set or untick physics. |
 
 ## Command line
 
 ```
-VRoidHunter install  avatar.vrm [--game DIR] [--armor pl001_0000] [--keep-face] [--height 1.0] [--female-only]
+VRoidHunter install  avatar.vrm [--game DIR] [--armor pl001_0000] [--no-physics] [--height 1.0] [--female-only]
+                     [--oodle PATH | --download-oodle]
 VRoidHunter export   avatar.vrm OUTDIR [same options]
 VRoidHunter uninstall [--game DIR]
 VRoidHunter armors   [--game DIR]
