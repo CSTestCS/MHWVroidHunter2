@@ -67,12 +67,12 @@ checked against known checksums. You can also pick the file yourself.
   under the helmet. Where it would poke out around a slimmer avatar neck, the
   avatar's neck is thickened just enough to cover it (at most 2x), and nothing
   else changes.
-* **Matches the game's lighting.** The avatar's skin uses the game's own
-  player-skin material (the one your hunter's face and arms use), and hair, eyes
-  and cloth are cloned from a plain, non-metal player material. Both keep the
-  game's wet settings, so the avatar only looks wet when your hunter would (rain,
-  water). Everything is matte by default, and colours are toned to the brightness
-  range the game's lighting expects.
+* **Matches the game's lighting.** Every part of the avatar uses a plain, non-metal
+  player material cloned from the game, with the game's own wet settings, so it
+  only looks wet when your hunter would (rain, water). Everything is matte by
+  default, and colours are toned to the brightness range the game's lighting
+  expects. (The game's own skin material isn't used: the game paints your
+  hunter's skin texture over it.)
 * **Splits the avatar like real armor.** The head and hair go in the helmet
   model, the rest in the body model. Armor pieces the avatar doesn't need (arms,
   waist, legs) are made invisible so they don't poke through.
